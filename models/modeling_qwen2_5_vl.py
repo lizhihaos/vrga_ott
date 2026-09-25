@@ -2567,9 +2567,24 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
         image_grid_thw=None,
         video_grid_thw=None,
         second_per_grid_ts=None,
+        modify_att: Optional[bool] = None,
+        q_end_pos: Optional[int] = None,
+        vision_start: Optional[int] = None,
+        vision_end: Optional[int] = None,
+        grid_w: Optional[int] = None,
         **kwargs,
     ):
         # Overwritten -- in specific circumstances we don't want to forward image inputs to the model
+
+        # Declare VRGA inputs for generate() validation and preserve them during cached decoding.
+        vrga_inputs = {
+            "modify_att": modify_att,
+            "q_end_pos": q_end_pos,
+            "vision_start": vision_start,
+            "vision_end": vision_end,
+            "grid_w": grid_w,
+        }
+        kwargs.update({key: value for key, value in vrga_inputs.items() if value is not None})
 
         model_inputs = super().prepare_inputs_for_generation(
             input_ids,

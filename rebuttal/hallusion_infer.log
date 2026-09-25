@@ -1,0 +1,65 @@
+good
+[ERROR] `cache_position` is part of Qwen2_5_VLTextModel.forward's signature, but not documented. Make sure to add it to the docstring of the function in /home/lizhihao/.local/lib/python3.12/site-packages/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py.
+[ERROR] `cache_position` is part of Qwen2_5_VLModel.forward's signature, but not documented. Make sure to add it to the docstring of the function in /home/lizhihao/.local/lib/python3.12/site-packages/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py.
+[ERROR] `cache_position` is part of Qwen2_5_VLForConditionalGeneration.forward's signature, but not documented. Make sure to add it to the docstring of the function in /home/lizhihao/.local/lib/python3.12/site-packages/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py.
+Device   : cuda:0
+Model    : Qwen2.5-VL-3B-Instruct
+Dataset  : HallusionBench
+Modify   : base
+With CoT : False
+Prompts  : direct
+Loaded dataset samples: 951
+
+================================================================================
+Evaluation Configuration
+================================================================================
+Dataset       : HallusionBench
+Model         : Qwen2.5-VL-3B-Instruct
+Modify        : base
+With CoT      : False
+Prompt modes  : Direct
+Max New Token : 2000
+Device        : cuda:0
+Tag           : HallusionBench_Qwen2.5-VL-3B-Instruct_base_False_direct_maxNew2000
+================================================================================
+No existing result. Starting from scratch.
+
+======================================================================
+Loading model
+======================================================================
+Model path: /home/lizhihao/.cache/huggingface/models/Qwen2.5-VL-3B-Instruct
+Traceback (most recent call last):
+  File "/home/lizhihao/phd/VRGA/run_qwen_eval.py", line 37, in <module>
+    main()
+  File "/home/lizhihao/phd/VRGA/run_qwen_eval.py", line 24, in main
+    evaluate(
+  File "/home/lizhihao/phd/VRGA/qwen_eval/evaluator.py", line 108, in evaluate
+    model, processor = load_model(model_name, device)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lizhihao/phd/VRGA/qwen_eval/modeling.py", line 28, in load_model
+    Qwen2_5_VLForConditionalGeneration.from_pretrained(
+  File "/home/lizhihao/.local/lib/python3.12/site-packages/transformers/modeling_utils.py", line 4412, in from_pretrained
+    model = cls(config, *model_args, **model_kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lizhihao/.local/lib/python3.12/site-packages/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py", line 2405, in __init__
+    self.model = Qwen2_5_VLModel(config)
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lizhihao/.local/lib/python3.12/site-packages/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py", line 1997, in __init__
+    self.language_model = Qwen2_5_VLTextModel._from_config(config.text_config)
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lizhihao/.local/lib/python3.12/site-packages/transformers/modeling_utils.py", line 1664, in _from_config
+    model = cls(config, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lizhihao/.local/lib/python3.12/site-packages/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py", line 1440, in __init__
+    [Qwen2_5_VLDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lizhihao/.local/lib/python3.12/site-packages/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py", line 1351, in __init__
+    self.self_attn = QWEN2_5_VL_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lizhihao/.local/lib/python3.12/site-packages/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py", line 722, in __init__
+    self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lizhihao/.local/lib/python3.12/site-packages/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py", line 589, in __init__
+    self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+                        ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+KeyError: 'default'
