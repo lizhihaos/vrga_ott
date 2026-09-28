@@ -12,6 +12,9 @@ Entry point: `scripts/run_qwen_eval2.py`.
 | `region_guided` | 1      | question + focus on the question-related region     | `region_guided`     |
 | `ccot`          | 2      | scene graph generation, then answer extraction      | `ccot_response`     |
 | `icot`          | 1      | CoT with image patches injected mid-generation      | `icot_response`     |
+| `anchor`        | 1      | direct prompt, attention anchored on tool boxes     | `anchor_response`   |
+| `anchor_cot`    | 1      | CoT prompt, attention anchored on tool boxes        | `anchor_response`   |
+| `vrg`           | 1      | CoT prompt, attention anchored on question attention | `anchor_response`  |
 
 The output field is always `{mode}_response`, so the name to read a
 generation is the same as the name used to produce it.
@@ -224,6 +227,86 @@ repetition is then no better than zero-shot (3 vs 1 at 8-gram over 12
 samples, i.e. within noise at that size). Score both settings with
 evaluate_deepseek.py before choosing; the zero-shot file is the safer
 default.
+
+## Attention anchoring
+
+VRGA boosts the attention weights of a set of image tokens during decoding.
+This section covers where that set of tokens comes from, which is the whole
+difference between the three anchoring modes:
+
+| Mode         | Region source                    | Prompt   | Output field      |
+| ------------ | -------------------------------- | -------- | ----------------- |
+| `anchor`     | tool located boxes               | direct   | `anchor_response` |
+| `anchor_cot` | tool located boxes               | CoT      | `anchor_response` |
+| `vrg`        | question attention, i.e. VRGA's  | CoT      | `anchor_response` |
+
+`direct` and `cot` are the controls for these rows: they use the same prompts
+with the intervention off, so a table of `direct / anchor` isolates the anchor
+and `cot / vrg` reproduces the paper's own source inside this codebase.
+
+The intervention is identical in all three modes, and it is the one VRGA
+validated: at every decode step (query length 1), for the heads whose mean
+attention on the image tokens is above `--anchor_head_ratio` (0.6) times their
+mean attention over all keys, the post-softmax weights of the anchored tokens
+are multiplied by `--anchor_multiply` (1.5) and the row is renormalised. Anchors
+are dilated by `--anchor_neighborhood` cells (1) and capped at
+`--anchor_max_token_fraction` of the image tokens (0.25).
+
+### The two region sources
+
+**Tool (`anchor`, `anchor_cot`).** One short grounding call before decoding:
+the question is asked in Qwen2.5-VL's grounding mode, the boxes it returns are
+mapped to image token cells, and the anchor is fixed from then on. It costs
+`--anchor_grounding_tokens` (96) tokens per sample at most, which is recorded
+per sample as `anchor_grounding_tokens` because an extra call has to be
+compared against spending the same call on sampling.
+
+**Attention (`vrg`).** The source the paper uses, ported so the two can be
+compared under one intervention: per layer and head, the last question token's
+row over the image tokens, with heads selected by entropy over image attention
+ratio (EFR) at the 5th percentile and image ratio at the 95th, the heads that
+barely look at the image subtracted, the first row and column excluded because
+the marker tokens that bracket the image collect attention there, and the cells
+above mean + 0.6 sd anchored. Reading `<|im_end|>` or the assistant opener
+instead of the question's own last token changes the region completely, so the
+position is taken as the token before the `<|im_end|>` that closes the user
+turn.
+
+### Where the patch goes
+
+`Qwen2_5_VLAttention.forward` resolves its default attention implementation
+from the globals of `modeling_qwen2_5_vl` at call time, and transformers
+registers no `eager` entry in `ALL_ATTENTION_FUNCTIONS`, so replacing that
+global intercepts every text attention call. `anchoring.install(model)` does
+that for Qwen2.5-VL and both Qwen3-VL modules, and nothing under
+site-packages is modified. It also switches the text config to eager if a
+loader left it at sdpa, because sdpa exposes no weights to intercept and the
+patch would otherwise be a silent no-op. `claim_hook_fired()` raises if the
+patch was never in a position to apply an anchor, so an inert patch cannot
+produce a table of null results.
+
+`output_attentions` stays off for anchored runs: the patch sees the weights
+inside the attention call, so no attention matrices are materialised and memory
+does not grow with the prompt. The intervention needs no training and no box
+annotations.
+
+### Region quality
+
+`tools/anchor_region_quality.py` measures where each source points without
+scoring anything, using the tool's box as the reference for the object. On 120
+POPE samples with Qwen2.5-VL-3B:
+
+| Source    | Touches the object | Mean coverage of it | Mean precision |
+| --------- | ------------------ | ------------------- | -------------- |
+| attention | 83 of 120          | 22 %                | 23 %           |
+| tool      | by construction    | 100 %               | 100 %          |
+
+So the source the paper replaces lands on the question's referent in about
+seven cases in ten and misses it entirely in the rest; the tool source is on
+the referent by construction, and its failure mode is different -- it will
+return a box for an object that is not in the image, which is what POPE's
+negative items measure. `tools/viz_anchor.py` draws both sources on the image
+for a handful of samples, which is how the numbers above were checked.
 
 ## Usage
 

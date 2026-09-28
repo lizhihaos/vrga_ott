@@ -3,13 +3,30 @@ import os
 
 from tqdm import tqdm
 
+from .anchoring import (
+    ANCHOR_MODES,
+    ANCHOR_PROMPT_MODE,
+    ANCHOR_REGION_SOURCE,
+    generate_anchored,
+    install,
+    uninstall,
+)
 from .ccot import generate_ccot
 from .generation import cleanup_gpu, generate_one, make_jsonable
 from .icot import generate_icot, load_demo
 from .modeling import load_model
 
 
-CANONICAL_MODE_ORDER = ["direct", "cot", "ccot", "icot", "region_guided"]
+CANONICAL_MODE_ORDER = [
+    "direct",
+    "cot",
+    "ccot",
+    "icot",
+    "region_guided",
+    "anchor",
+    "anchor_cot",
+    "vrg",
+]
 
 MODE_LABELS = {
     "direct": "Direct",
@@ -17,6 +34,9 @@ MODE_LABELS = {
     "ccot": "CCoT",
     "icot": "ICoT",
     "region_guided": "Region-Guided",
+    "anchor": "Anchor",
+    "anchor_cot": "Anchor-CoT",
+    "vrg": "VRG",
 }
 
 # JSONL field name for each generated key. Keys that are not listed here
@@ -27,7 +47,14 @@ MODE_OUTPUT_FIELDS = {
     "cot": "cot_response",
     "ccot": "ccot_response",
     "icot": "icot_response",
+    "anchor": "anchor_response",
+    "anchor_cot": "anchor_response",
+    "vrg": "anchor_response",
 }
+
+# The anchoring modes run the same two passes; only the prompt differs, so the
+# pair is table editable as one entry. Both are defined in anchoring.py next to
+# the method itself.
 
 
 def format_generation(output):
@@ -176,6 +203,11 @@ def evaluate(
     icot_demo=None,
     vision_attn=None,
     load_4bit=False,
+    anchor_multiply=1.5,
+    anchor_neighborhood=1,
+    anchor_head_ratio=0.6,
+    anchor_max_token_fraction=0.25,
+    anchor_grounding_tokens=96,
 ):
     """
     Generate VQA results.
@@ -296,6 +328,23 @@ def evaluate(
         f"Device        : {device}"
     )
 
+    if any(mode in ANCHOR_MODES for mode in modes):
+
+        print(
+            f"Anchor boost  : x{anchor_multiply} on "
+            f"{anchor_neighborhood} neighbour patches, "
+            f"heads above {anchor_head_ratio}x image mass"
+        )
+
+        print(
+            f"Anchor cap    : "
+            f"{anchor_max_token_fraction:.0%} of the image tokens"
+        )
+
+        print(
+            f"Grounding pass: up to {anchor_grounding_tokens} tokens"
+        )
+
     print(
         f"Tag           : {tag}"
     )
@@ -404,6 +453,22 @@ def evaluate(
         print(
             f"ICoT demo     : "
             f"{len(demo['crops'])} crops from {icot_demo}"
+        )
+
+    # ========================================================
+    # Attention patch
+    #
+    # Anchoring replaces the eager attention default in the Qwen VL modules and
+    # is inert until an anchor is set, so it can stay installed for the whole
+    # run even when the same command also generates non-anchored modes.
+    # ========================================================
+
+    if any(mode in ANCHOR_MODES for mode in modes):
+
+        patched = install(model)
+
+        print(
+            f"Anchor patch  : {', '.join(patched)}"
         )
 
     # ========================================================
@@ -620,6 +685,36 @@ def evaluate(
                                         icot_vision_markers
                                     ),
                                     demo=demo,
+                                )
+
+                            elif mode in ANCHOR_MODES:
+
+                                output = generate_anchored(
+                                    processor,
+                                    model,
+                                    sample,
+                                    prompt_mode=(
+                                        ANCHOR_PROMPT_MODE[mode]
+                                    ),
+                                    region_source=(
+                                        ANCHOR_REGION_SOURCE[mode]
+                                    ),
+                                    max_new_tokens=(
+                                        current_max_tokens
+                                    ),
+                                    max_token_fraction=(
+                                        anchor_max_token_fraction
+                                    ),
+                                    multiply=anchor_multiply,
+                                    neighborhood=(
+                                        anchor_neighborhood
+                                    ),
+                                    head_ratio=(
+                                        anchor_head_ratio
+                                    ),
+                                    grounding_max_new_tokens=(
+                                        anchor_grounding_tokens
+                                    ),
                                 )
 
                             else:
@@ -852,12 +947,53 @@ def evaluate(
                     },
                 }
 
+                for mode in ANCHOR_MODES:
+                    settings[mode] = {
+                        "anchor_region_source": ANCHOR_REGION_SOURCE[mode],
+                        "anchor_prompt_mode": ANCHOR_PROMPT_MODE[mode],
+                        "anchor_multiply": anchor_multiply,
+                        "anchor_neighborhood": anchor_neighborhood,
+                        "anchor_head_ratio": anchor_head_ratio,
+                        "anchor_max_token_fraction": (
+                            anchor_max_token_fraction
+                        ),
+                    }
+
                 extra_fields = {
                     "ccot": ("ccot_scene_graph",),
                     "icot": ("icot_insertions",),
                 }
 
+                for mode in ANCHOR_MODES:
+                    extra_fields[mode] = (
+                        "anchor_region_source",
+                        "anchor_boxes",
+                        "anchor_grounding",
+                        "anchor_grid",
+                        "anchor_token_count",
+                        "anchor_token_fraction",
+                        "anchor_dropped_boxes",
+                        "anchor_grounding_tokens",
+                        "anchor_selection",
+                        "anchor_modified_steps",
+                        "anchor_eligible_steps",
+                    )
+
                 for mode in pending_modes:
+
+                    # A mode that failed has no answer to record. Writing an
+                    # empty one would be counted as an answered sample on the
+                    # next run, so a crash would quietly become a wrong answer
+                    # and the method would be scored on a blank.
+                    if mode not in generated_tokens:
+
+                        print(
+                            f"[SKIP SAVE] id={dataset_id}, "
+                            f"mode={MODE_LABELS[mode]}: nothing was generated, "
+                            f"leaving it for the next run."
+                        )
+
+                        continue
 
                     record = {
                         "id": dataset_id,
@@ -967,6 +1103,15 @@ def evaluate(
         print(
             "Cleaning model from GPU..."
         )
+
+        # ------------------------------------------------------------
+        # Restore the attention implementation before the model goes away,
+        # so a later call in the same process sees stock transformers.
+        # ------------------------------------------------------------
+
+        if any(mode in ANCHOR_MODES for mode in modes):
+
+            uninstall()
 
         # ------------------------------------------------------------
         # Explicitly delete model / processor

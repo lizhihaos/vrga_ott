@@ -15,10 +15,31 @@ rebuttal/<dataset>/<model>/<mode>_maxNew<N>.jsonl
 | `cot` | question + "Think step by step." |
 | `ccot` | Compositional CoT: scene graph, then answer from it |
 | `icot` | Compositional CoT with image patches injected during decoding |
+| `anchor` / `anchor_cot` | VRGA's attention boost, anchored on tool located boxes |
+| `vrg` | the same boost, anchored on the question attention VRGA uses |
 
 Runs are resumable, greedy, and record the token budget they used. See
-`qwen_eval2/README.md` for the modes, the ICoT deviations and the one-shot
-demonstration.
+`qwen_eval2/README.md` for the modes, the ICoT deviations, the one-shot
+demonstration and the anchoring sources.
+
+## Attention anchoring (`qwen_eval2/anchoring.py`)
+
+VRGA's intervention with the region source replaced. The paper reads the region
+out of the question token's attention, which is produced by the same reasoning
+the paper says drifts; the anchoring modes fix the region before decoding
+starts, from a tool call or from the prefill, and keep it fixed.
+
+```text
+locate_regions     one grounding call: question -> boxes
+box_to_token_indices  box -> image token cells, on the 2x2 merged grid
+RegionAnchor       fixed regions from those boxes
+AttentionSourceAnchor  the paper's own source, ported for the comparison
+install            replaces the eager attention default, no site-packages edit
+```
+
+Needs eager text attention, needs no training and no box annotations, and
+stores the raw grounding text with every result so a wrong coordinate
+convention is visible rather than silently anchored.
 
 ## Methods (`cgr/`)
 
@@ -60,8 +81,11 @@ All of them work from any directory; each adds the repository root to
 | ------ | ------- |
 | `build_icot_demo.py` | builds the one-shot ICoT demonstration from a held out sample |
 | `viz_grounding.py` | draws the boxes a record produced, plus the crops the verifier saw |
+| `viz_anchor.py` | draws the anchored cells and the box they came from |
+| `anchor_region_quality.py` | measures where each region source points, no judge needed |
 | `check_degeneration.py` | repetition, near-empty and post-injection truncation rates |
 | `check_model_dir.py` | verifies an uploaded checkpoint before spending GPU hours |
+| `report_metrics.py` | per-subset accuracy, refusal rate and anchoring cost |
 
 ## Orchestration (`runs/`)
 
@@ -69,12 +93,27 @@ All of them work from any directory; each adds the repository root to
 | ------ | ------- |
 | `run_all_datasets.sh` | every dataset, every mode, then scoring and tables |
 | `run_mmstar_compare.sh` | the current comparison on the MMStar perception subset |
+| `run_mmstar_full.sh` | the four prompt modes on the whole 1500 sample MMStar |
+| `run_pope_anchor.sh` | POPE pilot: controls, both region sources, all three anchor rows |
 
 ## Results
 
 Written under `rebuttal/` and ignored by git; regenerate with the pipeline.
 
 ## What the measurements say so far
+
+Where each region source points, 120 POPE samples, Qwen2.5-VL-3B, measured
+against the tool's own box and checked by eye with `tools/viz_anchor.py`:
+
+| Source | Touches the object | Coverage of it | Precision |
+| ------ | ------------------ | -------------- | --------- |
+| question attention (`vrg`) | 83 of 120 | 22 % | 23 % |
+| tool boxes (`anchor`) | by construction | 100 % | 100 % |
+
+The source the paper replaces misses the question's referent entirely in about
+three cases in ten. The tool source is on it by construction, and its own
+failure mode is the opposite one: it returns a box for an object that is not in
+the image, which is what the negative half of POPE measures.
 
 On HaloQuest (600 samples, one decoding setting, no dropped samples):
 

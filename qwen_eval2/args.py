@@ -92,8 +92,57 @@ def parse_args():
         default=None,
         help=(
             "Comma-separated prompt modes to generate. "
-            "Choices: direct,cot,region_guided,ccot. "
+            "Choices: direct,cot,region_guided,ccot,anchor,anchor_cot. "
             "Example: --prompt_modes direct,cot,ccot"
+        ),
+    )
+    parser.add_argument(
+        "--anchor_multiply",
+        type=float,
+        default=1.5,
+        help=(
+            "Anchoring: factor applied to the attention weights of the tool "
+            "located patches. 1.0 turns the intervention off, which makes the "
+            "run a prompt-only control."
+        ),
+    )
+    parser.add_argument(
+        "--anchor_neighborhood",
+        type=int,
+        default=1,
+        help=(
+            "Anchoring: patches dilated around each located patch, matching "
+            "the VRGA window so the two region sources are comparable"
+        ),
+    )
+    parser.add_argument(
+        "--anchor_head_ratio",
+        type=float,
+        default=0.6,
+        help=(
+            "Anchoring: a head is boosted only if its mean attention on the "
+            "image tokens exceeds this multiple of its mean attention over all "
+            "keys. VRGA uses 0.6."
+        ),
+    )
+    parser.add_argument(
+        "--anchor_max_token_fraction",
+        type=float,
+        default=0.25,
+        help=(
+            "Anchoring: cap on the fraction of image tokens one anchor may "
+            "cover. Boxes are dropped largest first until the union fits, so a "
+            "degenerate whole-image box cannot anchor everything."
+        ),
+    )
+    parser.add_argument(
+        "--anchor_grounding_tokens",
+        type=int,
+        default=96,
+        help=(
+            "Anchoring: token budget for the grounding call that produces the "
+            "boxes. Recorded per sample, because that call is the cost the "
+            "method has to justify against sampling."
         ),
     )
     parser.add_argument(

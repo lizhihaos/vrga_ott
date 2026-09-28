@@ -45,6 +45,13 @@ def main():
               f"markers = {args.icot_vision_markers}, "
               f"demo = {args.icot_demo or 'zero-shot'}")
 
+    if "anchor" in (args.prompt_modes or ""):
+        print(f"Anchor   : x{args.anchor_multiply} on "
+              f"{args.anchor_neighborhood} neighbours, "
+              f"head ratio = {args.anchor_head_ratio}, "
+              f"cap = {args.anchor_max_token_fraction:.0%} of image tokens, "
+              f"grounding <= {args.anchor_grounding_tokens} tokens")
+
     eval_dataset = EvalDataset(args.data_name)
     data = eval_dataset.get_data()
 
@@ -80,6 +87,11 @@ def main():
         icot_demo=args.icot_demo,
         vision_attn=args.vision_attn,
         load_4bit=args.load_4bit,
+        anchor_multiply=args.anchor_multiply,
+        anchor_neighborhood=args.anchor_neighborhood,
+        anchor_head_ratio=args.anchor_head_ratio,
+        anchor_max_token_fraction=args.anchor_max_token_fraction,
+        anchor_grounding_tokens=args.anchor_grounding_tokens,
     )
 
 

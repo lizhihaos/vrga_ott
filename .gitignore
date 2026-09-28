@@ -27,3 +27,8 @@ rebuttal/baseline_table*.md
 
 # Paper collection: copyrighted PDFs and extracted text stay local.
 papers/
+
+# Region quality measurements are results; regenerate with
+# tools/anchor_region_quality.py rather than committing the dump.
+rebuttal/anchor_region_quality*.json
+rebuttal/figs/

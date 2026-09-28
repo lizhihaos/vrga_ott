@@ -42,6 +42,85 @@ REFUSAL = re.compile(
     re.IGNORECASE,
 )
 
+# POPE and the yes/no half of the hallucination benchmarks answer with a bare
+# yes or no, which the NEGATIVE pattern does not match: it looks for phrases
+# like "no such object", not a plain "no".
+YES_NO = re.compile(r"^\s*(yes|no)\b", re.IGNORECASE)
+
+
+def is_negative(answer):
+    """Whether a ground truth says the asked-about thing is absent."""
+
+    text = str(answer)
+
+    match = YES_NO.match(text)
+
+    if match:
+        return match.group(1).lower() == "no"
+
+    return bool(NEGATIVE.search(text))
+
+
+def anchor_cost(generations_dir, mode):
+    """Mean cost and coverage of an anchoring run, read from its own records.
+
+    A method that spends an extra call per sample has to be compared against
+    what that call would have bought in sampling, and that comparison needs the
+    call's size. `anchor_grounding_tokens` is what the grounding pass generated
+    and `anchor_token_fraction` is the share of the image the anchor covered,
+    both of which say whether the intervention was aimed at anything at all.
+    """
+
+    if not generations_dir or not os.path.isdir(generations_dir):
+        return None
+
+    candidates = [
+        name for name in os.listdir(generations_dir)
+        if name.startswith(f"{mode}_maxNew") and name.endswith(".jsonl")
+    ]
+
+    if not candidates:
+        return None
+
+    records = []
+
+    with open(
+        os.path.join(generations_dir, sorted(candidates)[0]),
+        encoding="utf-8",
+    ) as handle:
+
+        for line in handle:
+
+            line = line.strip()
+
+            if not line:
+                continue
+
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if "anchor_grounding_tokens" in item:
+                records.append(item)
+
+    if not records:
+        return None
+
+    def mean(key):
+        values = [r[key] for r in records if r.get(key) is not None]
+        return sum(values) / len(values) if values else float("nan")
+
+    return {
+        "n": len(records),
+        "grounding_tokens": mean("anchor_grounding_tokens"),
+        "fraction": mean("anchor_token_fraction"),
+        "empty": (
+            sum(1 for r in records if not r.get("anchor_token_count"))
+            / len(records)
+        ),
+    }
+
 
 def parse_args():
 
@@ -52,6 +131,11 @@ def parse_args():
     parser.add_argument("--data_name", type=str, default="haloquest")
     parser.add_argument("--response_field", type=str, default=None,
                         help="Field in the generation file holding the answer text")
+    parser.add_argument("--generations", type=str, default=None,
+                        help="Directory of the generation JSONL files, to report "
+                             "what an anchoring run spent and covered")
+    parser.add_argument("--generations_suffix", type=str, default="maxNew2000",
+                        help="Token tag of the generation files to read")
 
     return parser.parse_args()
 
@@ -101,7 +185,7 @@ def main():
 
         # Ground-truth polarity decides whether refusing is the right move.
         def negative(r):
-            return bool(NEGATIVE.search(truth.get(r["id"], {}).get("answer", "")))
+            return is_negative(truth.get(r["id"], {}).get("answer", ""))
 
         def refused(r):
             return bool(REFUSAL.search(str(r.get("model_response", ""))))
@@ -129,13 +213,14 @@ def main():
                     len([r for r in results if truth.get(r["id"], {}).get("type") == t]))
                 for t in sorted({truth.get(r["id"], {}).get("type", "") for r in results})
             },
+            "cost": anchor_cost(args.generations, name[:-5]),
         })
 
     if not rows:
         raise SystemExit(f"No scored files in {args.scores}")
 
     neg_share = sum(
-        1 for v in truth.values() if NEGATIVE.search(v["answer"])
+        1 for v in truth.values() if is_negative(v["answer"])
     ) / max(1, len(truth))
 
     print()
@@ -173,6 +258,33 @@ def main():
     print()
     print("Read the pos-GT column first: that is where refusing is wrong, so")
     print("it separates a method that sees the image from one that declines.")
+
+    if any(row["cost"] for row in rows):
+
+        print()
+        print("What the anchoring runs spent and covered:")
+        print(f"{'mode':10s} {'n':>4s} {'ground tok':>11s} {'img cover':>10s} "
+              f"{'empty':>7s}")
+        print("-" * 46)
+
+        for row in rows:
+
+            if not row["cost"]:
+                continue
+
+            cost = row["cost"]
+
+            print(
+                f"{row['mode']:10s} {cost['n']:4d} "
+                f"{cost['grounding_tokens']:11.1f} "
+                f"{cost['fraction'] * 100:9.1f}% "
+                f"{cost['empty'] * 100:6.1f}%"
+            )
+
+        print()
+        print("An anchor that covers a large share of the image is not a region,")
+        print("and one that is empty means the tool returned nothing usable, so")
+        print("both are reported next to the accuracy rather than hidden in it.")
 
     return 0
 
