@@ -135,8 +135,22 @@ against the tool's own box and checked by eye with `tools/viz_anchor.py`:
 
 The source the paper replaces misses the question's referent entirely in about
 three cases in ten. The tool source is on it by construction, and its own
-failure mode is the opposite one: it returns a box for an object that is not in
-the image, which is what the negative half of POPE measures.
+failure mode is the opposite one: asked plainly it returns a box for every one
+of the 120 samples, including all 60 whose object is absent by construction, so
+a negative item gets anchored on a hallucinated region. Asked to abstain
+(`--anchor_grounding_abstain`) it answers with an empty list on 18 of 20 absent
+objects and on only 1 of 20 present ones, which is what makes POPE's negative
+half a test rather than a foregone conclusion.
+
+| Grounding prompt | Abstains on absent | Abstains on present |
+| ---------------- | ------------------ | ------------------- |
+| plain | 0 of 20 | 0 of 20 |
+| abstain | 18 of 20 | 1 of 20 |
+
+That is the verifier precision the literature reports least often, and here it
+turns a one-line prompt change into a usable gate: an empty anchor is recorded
+and leaves the intervention inert for that sample instead of aiming it at a
+region the question was about and the image does not contain.
 
 On HaloQuest (600 samples, one decoding setting, no dropped samples):
 

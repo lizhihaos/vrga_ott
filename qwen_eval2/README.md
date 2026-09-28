@@ -261,6 +261,14 @@ mapped to image token cells, and the anchor is fixed from then on. It costs
 per sample as `anchor_grounding_tokens` because an extra call has to be
 compared against spending the same call on sampling.
 
+Measured on 120 POPE samples, the plain prompt returns a box for every single
+one, including all 60 whose object is absent by construction, so a negative
+item is anchored on a hallucinated region. `--anchor_grounding_abstain` asks the
+tool to answer with an empty list instead, and on 20 present and 20 absent
+samples it abstains on 18 of the absent ones while dropping only 1 of the
+present ones. Empty anchors are recorded as such (`anchor_token_count` 0) and
+leave the intervention inert for that sample rather than aimed at nothing.
+
 **Attention (`vrg`).** The source the paper uses, ported so the two can be
 compared under one intervention: per layer and head, the last question token's
 row over the image tokens, with heads selected by entropy over image attention

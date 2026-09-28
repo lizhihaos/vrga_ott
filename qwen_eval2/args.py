@@ -136,6 +136,17 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--anchor_grounding_abstain",
+        action="store_true",
+        help=(
+            "Anchoring: let the grounding call answer with an empty list when "
+            "the question's object is not visible. Without it the tool returns "
+            "a box for every sample, so a negative item gets anchored on a "
+            "hallucinated region; with it the tool's precision becomes "
+            "observable, at the risk of abstaining on real objects."
+        ),
+    )
+    parser.add_argument(
         "--anchor_grounding_tokens",
         type=int,
         default=96,

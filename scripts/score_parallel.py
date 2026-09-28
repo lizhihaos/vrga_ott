@@ -43,7 +43,13 @@ def parse_args():
 
     parser.add_argument("--input", type=str, required=True)
     parser.add_argument("--mode", type=str, required=True,
-                        help="Response field to read, as '{mode}_response'")
+                        help="Mode name, used for the log line and as the "
+                             "response field when --response_field is not given")
+    parser.add_argument("--response_field", type=str, default=None,
+                        help="Field holding the answer text. Defaults to "
+                             "'{mode}_response'; the anchoring modes all write "
+                             "'anchor_response' whatever their mode name is, so "
+                             "they need this to be set.")
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--retries", type=int, default=5)
@@ -90,9 +96,8 @@ def ask(question, ground_truth, response, retries):
     return 0, "ERROR"
 
 
-def score_one(item, mode, index, retries):
+def score_one(item, field, index, retries):
 
-    field = f"{mode}_response"
     response = item.get(field, "")
 
     question = item.get("question", "")
@@ -158,7 +163,13 @@ def main():
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
 
         futures = {
-            pool.submit(score_one, item, args.mode, index, args.retries): index
+            pool.submit(
+                score_one,
+                item,
+                args.response_field or f"{args.mode}_response",
+                index,
+                args.retries,
+            ): index
             for index, item in pending
         }
 

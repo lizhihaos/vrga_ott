@@ -92,6 +92,7 @@ def main():
         anchor_head_ratio=args.anchor_head_ratio,
         anchor_max_token_fraction=args.anchor_max_token_fraction,
         anchor_grounding_tokens=args.anchor_grounding_tokens,
+        anchor_grounding_abstain=args.anchor_grounding_abstain,
     )
 
 

@@ -209,6 +209,7 @@ def evaluate(
     anchor_head_ratio=0.6,
     anchor_max_token_fraction=0.25,
     anchor_grounding_tokens=96,
+    anchor_grounding_abstain=False,
 ):
     """
     Generate VQA results.
@@ -255,17 +256,20 @@ def evaluate(
     # One folder per dataset, one file per mode inside it: scoring,
     # re-running a single mode and the resume state all stay independent.
     #
-    # An anchoring run at a non-default strength is a different experiment on
-    # the same samples, so it gets its own file rather than mixing with the
-    # strength the paper reports.
+    # An anchoring run with a non-default strength or with abstention is a
+    # different experiment on the same samples, so it gets its own file rather
+    # than mixing with the setting the paper reports.
     boost_tag = ""
 
-    if (
-        any(mode in ANCHOR_MODES for mode in modes)
-        and anchor_multiply != ANCHOR_DEFAULT_MULTIPLY
-    ):
+    if any(mode in ANCHOR_MODES for mode in modes):
 
-        boost_tag = f"_boost{anchor_multiply:g}"
+        if anchor_multiply != ANCHOR_DEFAULT_MULTIPLY:
+
+            boost_tag += f"_boost{anchor_multiply:g}"
+
+        if anchor_grounding_abstain:
+
+            boost_tag += "_abstain"
 
     tag_by_mode = {
         mode: f"{mode}{boost_tag}{demo_tag}_maxNew{max_new_tokens}"
@@ -729,6 +733,9 @@ def evaluate(
                                     grounding_max_new_tokens=(
                                         anchor_grounding_tokens
                                     ),
+                                    grounding_abstain=(
+                                        anchor_grounding_abstain
+                                    ),
                                 )
 
                             else:
@@ -971,6 +978,9 @@ def evaluate(
                         "anchor_max_token_fraction": (
                             anchor_max_token_fraction
                         ),
+                        "anchor_grounding_abstain": (
+                            anchor_grounding_abstain
+                        ),
                     }
 
                 extra_fields = {
@@ -988,6 +998,7 @@ def evaluate(
                         "anchor_token_fraction",
                         "anchor_dropped_boxes",
                         "anchor_grounding_tokens",
+                        "anchor_grounding_abstain",
                         "anchor_selection",
                         "anchor_modified_steps",
                         "anchor_eligible_steps",

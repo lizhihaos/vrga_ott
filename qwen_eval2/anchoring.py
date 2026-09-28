@@ -77,6 +77,21 @@ GROUNDING_PROMPT = (
     "with the coordinates scaled to 0-1000."
 )
 
+# The same call with permission to find nothing. Measured on 120 POPE samples,
+# the plain prompt returns a box for every single one, including all 60 where
+# the question's object is absent by construction, and anchoring on that box
+# anchors a hallucination. This asks the tool to abstain instead, which is the
+# only way its precision is observable at all.
+GROUNDING_PROMPT_ABSTAIN = (
+    "Locate the objects that the question asks about, and only those.\n"
+    "If an object the question asks about is not visible in the image, leave it "
+    "out. It is correct to answer with an empty list.\n"
+    "Question: {question}\n"
+    "Answer with a JSON list and nothing else: "
+    '[{{"bbox_2d": [x1, y1, x2, y2], "label": "name"}}] '
+    "with the coordinates scaled to 0-1000."
+)
+
 # Four numbers, optionally in Qwen's native <|box_start|>(x,y),(x,y) form.
 _BOX_JSON = re.compile(
     r"\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,"
@@ -131,6 +146,7 @@ def locate_regions(
     question,
     max_new_tokens=96,
     convention="pixel",
+    abstain=False,
 ):
     """One short generation that turns the question into boxes.
 
@@ -140,7 +156,9 @@ def locate_regions(
     "tool call" against "the same call spent on sampling".
     """
 
-    prompt = GROUNDING_PROMPT.replace("{question}", question.strip())
+    template = GROUNDING_PROMPT_ABSTAIN if abstain else GROUNDING_PROMPT
+
+    prompt = template.replace("{question}", question.strip())
 
     content = [
         {"type": "image", "image": load_image(image), "max_pixels": MAX_PIXELS},
@@ -909,6 +927,7 @@ def generate_anchored(
     head_ratio=0.6,
     layers=None,
     grounding_max_new_tokens=96,
+    grounding_abstain=False,
 ):
     """Answer with the intervention active, anchored on located regions.
 
@@ -932,6 +951,7 @@ def generate_anchored(
             image,
             question,
             max_new_tokens=grounding_max_new_tokens,
+            abstain=grounding_abstain,
         )
 
     elif region_source != "attention":
@@ -978,6 +998,7 @@ def generate_anchored(
     result = {
         "anchor_response": "",
         "anchor_region_source": region_source,
+        "anchor_grounding_abstain": grounding_abstain,
         "anchor_boxes": kept_boxes,
         "anchor_grounding": raw_boxes,
         "anchor_grid": [geometry["grid_h"], geometry["grid_w"]],
