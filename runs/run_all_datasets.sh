@@ -60,7 +60,7 @@ score_dataset() {
             continue
         fi
 
-        $PY score_parallel.py --input "$file" --mode "$m" \
+        $PY scripts/score_parallel.py --input "$file" --mode "$m" \
             --output "$SCORES/${dataset}/${MODEL_FULL}/${m}.json" --workers 12 \
             >> "$LOGS/${tag}_score.log" 2>&1
     done
@@ -76,7 +76,7 @@ run_qwen() {
 
         echo "[run] $tag on $dataset (cap $CAP) start $(date +%H:%M)"
 
-        $PY run_qwen_eval2.py \
+        $PY scripts/run_qwen_eval2.py \
             --model_name "$model" \
             --device "$device" \
             --data_name "$dataset" \
@@ -100,7 +100,7 @@ run_r1() {
 
         echo "[run] r1-onevision on $dataset (cap $CAP) start $(date +%H:%M)"
 
-        $PY run_r1_eval.py \
+        $PY scripts/run_r1_eval.py \
             --data_name "$dataset" \
             --max_new_tokens "$MAXTOK" \
             $LIMIT_ARG \
@@ -112,7 +112,7 @@ run_r1() {
         file="rebuttal/${dataset}/R1-OneVision-7B/cot_maxNew${MAXTOK}.jsonl"
 
         if [ -f "$file" ]; then
-            $PY score_parallel.py --input "$file" --mode cot \
+            $PY scripts/score_parallel.py --input "$file" --mode cot \
                 --output "$SCORES/${dataset}/R1-OneVision-7B/cot.json" \
                 --workers 12 >> "$LOGS/r1_score.log" 2>&1
         fi
@@ -143,7 +143,7 @@ run_r1
 # ------------------------------------------------------------
 
 echo "===== tables ====="
-$PY build_table.py --scores "$SCORES" --datasets "$DATASETS" \
+$PY scripts/build_table.py --scores "$SCORES" --datasets "$DATASETS" \
     --models Qwen2.5-VL-3B-Instruct,Qwen2.5-VL-7B-Instruct,R1-OneVision-7B \
     --modes "$MODES,cot" \
     --markdown rebuttal/baseline_tables.md

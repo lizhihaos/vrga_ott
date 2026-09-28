@@ -21,7 +21,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# The repository root holds evaluate_deepseek.py and the packages.
+sys.path.insert(
+    0,
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
 
 from evaluate_deepseek import (
     JUDGE_SYSTEM_PROMPT,

@@ -96,7 +96,8 @@ class Tools:
     # ========================================================
 
     def generate(self, image, prompt, max_new_tokens=256,
-                 temperature=None, top_p=None):
+                 temperature=None, top_p=None, extra_images=None,
+                 stop_strings=None):
         """One VLM call, image optional.
 
         temperature None keeps it greedy, which is what the verification
@@ -117,6 +118,16 @@ class Tools:
                 "max_pixels": MAX_PIXELS,
             })
 
+        # Observations can be images: a crop the previous action returned is
+        # handed back as a second image, so the next thought is formed on the
+        # re-perceived region rather than on a remembered description.
+        for extra in (extra_images or []):
+            content.append({
+                "type": "image",
+                "image": load_image(extra),
+                "max_pixels": MAX_PIXELS,
+            })
+
         content.append({"type": "text", "text": prompt})
 
         inputs = inputs_from_content(self.processor, self.model, content)
@@ -132,6 +143,11 @@ class Tools:
                 do_sample=sampling,
                 temperature=temperature if sampling else None,
                 top_p=top_p if sampling else None,
+                # A small model will happily write the tool's Observation
+                # itself and then stop emitting actions, so generation is cut
+                # at the boundary instead.
+                stop_strings=stop_strings,
+                tokenizer=self.processor.tokenizer if stop_strings else None,
             )
 
         new_ids = output[0][inputs["input_ids"].shape[1]:]
@@ -389,6 +405,37 @@ class Tools:
 
         if predicate in ("overlap", "in_front_of"):
             return Tools._iou(box_a, box_b) > 0.1
+
+        # "on" and "under" are about vertical contact plus horizontal
+        # overlap, which geometry computes exactly. Sending them to the VLM
+        # made it judge a suitcase resting on the ground with a brochure
+        # sticking out under its edge as "not on", and the ground truth
+        # disagreed.
+        if predicate in ("on", "on_top_of", "on_top", "under", "beneath",
+                         "underneath", "below"):
+
+            # Support means: the upper object sits higher, they overlap
+            # horizontally, and the upper one's bottom reaches the lower one's
+            # top rather than floating far above it. Bounding boxes only, so
+            # "reaches" has to tolerate the upper box crossing the lower one.
+            upper, lower = (box_a, box_b) if predicate.startswith("on") else (box_b, box_a)
+
+            span = min(upper[2], lower[2]) - max(upper[0], lower[0])
+            overlap = span / max(1e-6, min(upper[2] - upper[0], lower[2] - lower[0]))
+
+            upper_cy = (upper[1] + upper[3]) / 2
+            lower_cy = (lower[1] + lower[3]) / 2
+
+            return (
+                upper_cy < lower_cy
+                and overlap > 0.25
+                and upper[3] > lower[1] - 0.35 * (upper[3] - upper[1])
+            )
+
+        if predicate in ("inside", "in", "contains"):
+            cx = (box_a[0] + box_a[2]) / 2
+            cy = (box_a[1] + box_a[3]) / 2
+            return box_b[0] <= cx <= box_b[2] and box_b[1] <= cy <= box_b[3]
 
         if predicate in ("near", "next_to", "beside"):
             # Edge gap rather than centre distance: two boxes of very

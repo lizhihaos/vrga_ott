@@ -29,6 +29,16 @@ import torch
 from modelscope import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 from qwen_vl_utils import process_vision_info
 
+import os
+import sys
+
+# Allow running from any directory: the repository root holds cgr/,
+# qwen_eval2/ and evaluate_deepseek.py.
+sys.path.insert(
+    0,
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
+
 from qwen_eval2.datasets import EvalDataset
 from qwen_eval2.images import load_image
 

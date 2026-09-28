@@ -22,6 +22,16 @@ import time
 
 import torch
 
+import os
+import sys
+
+# Allow running from any directory: the repository root holds cgr/,
+# qwen_eval2/ and evaluate_deepseek.py.
+sys.path.insert(
+    0,
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
+
 from qwen_eval2.datasets import EvalDataset
 from qwen_eval2.images import load_image
 from qwen_eval2.inputs import generate_inputs

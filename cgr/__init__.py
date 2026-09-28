@@ -20,6 +20,8 @@ from .schema import Attribute, ConstraintGraph, Hop, Relation, Target
 from .parser import parse_question
 from .claims import parse_claims
 from .reground import ReGrounding
+from .grounded_cg import GroundedCCoT
+from .react import React
 from .select import Selector
 
 __all__ = [
@@ -32,4 +34,6 @@ __all__ = [
     "parse_claims",
     "ReGrounding",
     "Selector",
+    "GroundedCCoT",
+    "React",
 ]

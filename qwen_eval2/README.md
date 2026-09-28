@@ -1,7 +1,7 @@
 # qwen_eval2
 
 Generation pipeline for Qwen2.5-VL / Qwen3-VL on the `EvalDataset` benchmarks.
-Entry point: `run_qwen_eval2.py`.
+Entry point: `scripts/run_qwen_eval2.py`.
 
 ## Prompt Modes
 
@@ -139,7 +139,7 @@ unstable.
 Before using ICoT numbers, run a pilot and check coherence:
 
 ```bash
-/home/lizhihao/miniconda3/envs/tifa/bin/python run_qwen_eval2.py \
+/home/lizhihao/miniconda3/envs/tifa/bin/python scripts/run_qwen_eval2.py \
     --data_name haloquest --prompt_modes cot,icot --max_new_tokens 200
 ```
 
@@ -156,7 +156,7 @@ placeholders, so the demonstration is built mechanically here:
 
 ```bash
 cd /home/lizhihao/phd/VRGA
-/home/lizhihao/miniconda3/envs/tifa/bin/python build_icot_demo.py \
+/home/lizhihao/miniconda3/envs/tifa/bin/python tools/build_icot_demo.py \
     --data_name haloquest --out qwen_eval2/demos/haloquest --index 8 --device 0
 ```
 
@@ -192,7 +192,7 @@ injection. See the measurements below.
 Run with the demonstration:
 
 ```bash
-/home/lizhihao/miniconda3/envs/tifa/bin/python run_qwen_eval2.py \
+/home/lizhihao/miniconda3/envs/tifa/bin/python scripts/run_qwen_eval2.py \
     --data_name haloquest --prompt_modes icot \
     --icot_demo qwen_eval2/demos/haloquest --max_new_tokens 200
 ```
@@ -230,7 +230,7 @@ default.
 ```bash
 cd /home/lizhihao/phd/VRGA
 
-/home/lizhihao/miniconda3/envs/tifa/bin/python run_qwen_eval2.py \
+/home/lizhihao/miniconda3/envs/tifa/bin/python scripts/run_qwen_eval2.py \
     --model_name Qwen2.5-VL-3B-Instruct \
     --data_name haloquest \
     --prompt_modes ccot \
@@ -241,7 +241,7 @@ cd /home/lizhihao/phd/VRGA
 Run CCoT next to the baselines on the same samples:
 
 ```bash
-/home/lizhihao/miniconda3/envs/tifa/bin/python run_qwen_eval2.py \
+/home/lizhihao/miniconda3/envs/tifa/bin/python scripts/run_qwen_eval2.py \
     --data_name haloquest \
     --prompt_modes direct,cot,ccot
 ```
@@ -268,7 +268,7 @@ So the first lever is the vision tower's attention implementation, not a
 second GPU:
 
 ```bash
-python run_qwen_eval2.py --model_name Qwen2.5-VL-7B-Instruct \
+python scripts/run_qwen_eval2.py --model_name Qwen2.5-VL-7B-Instruct \
     --data_name haloquest --prompt_modes cot,icot --vision_attn sdpa
 ```
 
@@ -278,7 +278,7 @@ numerics slightly, so every mode you compare must use the same setting.
 When the weights alone no longer fit, shard across every visible GPU:
 
 ```bash
-python run_qwen_eval2.py --model_name Qwen2.5-VL-32B-Instruct \
+python scripts/run_qwen_eval2.py --model_name Qwen2.5-VL-32B-Instruct \
     --data_name haloquest --prompt_modes cot,icot --device auto --vision_attn sdpa
 ```
 
@@ -357,7 +357,7 @@ same mode name used for generation:
 | `icot`   | `icot_response`   |
 
 ```bash
-/home/lizhihao/miniconda3/envs/tifa/bin/python evaluate_deepseek.py \
+/home/lizhihao/miniconda3/envs/tifa/bin/python scripts/../evaluate_deepseek.py \
     --input rebuttal/haloquest_Qwen2.5-VL-3B-Instruct_ccot_maxNew2000.jsonl \
     --mode ccot
 ```

@@ -21,8 +21,20 @@ import time
 
 import torch
 
+import os
+import sys
+
+# Allow running from any directory: the repository root holds cgr/,
+# qwen_eval2/ and evaluate_deepseek.py.
+sys.path.insert(
+    0,
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
+
 from cgr.controller import Controller
 from cgr.reground import ReGrounding
+from cgr.grounded_cg import GroundedCCoT
+from cgr.react import React
 from cgr.select import Selector
 from cgr.tools import Tools
 from qwen_eval2.datasets import EvalDataset
@@ -46,12 +58,15 @@ def parse_args():
     parser.add_argument("--types", type=str, default=None,
                         help="Only samples whose type contains one of these, comma separated")
     parser.add_argument("--pipeline", type=str, default="claims",
-                        choices=["select", "claims", "constraint"],
-                        help="select = sample N answers, keep the one the image "
-                             "supports most (recommended); claims = draft, verify, "
-                             "repair; constraint = question-driven graph")
+                        choices=["cg", "react", "select", "claims", "constraint"],
+                        help="cg = grounded CCoT scene graph (recommended); "
+                             "react = reason-act loop; select = sample N answers "
+                             "and keep the best supported; claims = draft, verify, "
+                             "repair; constraint = question-driven graph search")
     parser.add_argument("--beam", type=int, default=3)
     parser.add_argument("--max_claims", type=int, default=6)
+    parser.add_argument("--max_steps", type=int, default=6,
+                        help="ReAct loop budget")
     parser.add_argument("--samples", type=int, default=3,
                         help="Number of answers the select pipeline samples")
     parser.add_argument("--locate_backend", type=str, default="dino",
@@ -117,7 +132,15 @@ def main():
         max_candidates=args.max_candidates,
     )
 
-    if args.pipeline == "select":
+    if args.pipeline == "cg":
+
+        solver = GroundedCCoT(tools, max_elements=args.max_claims)
+
+    elif args.pipeline == "react":
+
+        solver = React(tools, max_steps=args.max_steps)
+
+    elif args.pipeline == "select":
 
         solver = Selector(
             tools,
@@ -165,7 +188,7 @@ def main():
     # nothing.
     save_path = os.path.join(
         save_dir,
-        f"cgr-{backend}_maxNew{args.answer_tokens}.jsonl",
+        f"cgr-{args.pipeline}-{backend}_maxNew{args.answer_tokens}.jsonl",
     )
 
     done = set()
@@ -252,7 +275,12 @@ def main():
             "cgr_claims": result.get("claims"),
             "cgr_verdicts": result.get("verdicts"),
             "cgr_retracted": result.get("retracted"),
+            "cgr_rejected": result.get("rejected"),
             "cgr_repaired": result.get("repaired"),
+            "cgr_steps": result.get("steps"),
+            "cgr_plan": result.get("plan"),
+            "cgr_grounded": result.get("grounded"),
+            "cgr_boxed": result.get("boxes"),
             "cgr_candidates": result.get("candidates"),
             "cgr_chosen": result.get("chosen"),
             "cgr_graph": result.get("graph"),
