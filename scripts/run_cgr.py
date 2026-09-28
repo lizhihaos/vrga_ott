@@ -79,6 +79,14 @@ def parse_args():
                         help="The final answer cap, keep it equal to the CoT baseline's "
                              "max_new_tokens so the comparison is budget matched")
     parser.add_argument("--max_calls", type=int, default=48)
+    parser.add_argument("--verify_objects", action="store_true",
+                        help="cgv2 shows every located crop back to the model and "
+                             "keeps the instance only if it says the object is "
+                             "there, which is the only step that can report an "
+                             "absent object instead of the place where it would "
+                             "be. Unreliable on phrase-like names (bottom stripe "
+                             "of the rainbow) and a rejected instance takes the "
+                             "whole element with it, so it is off by default.")
     parser.add_argument("--fallback", type=str, default="refuse",
                         choices=["refuse", "direct"],
                         help="cgv2 在 plan 解析失败或 plan 为空时怎么办。refuse "
@@ -156,6 +164,7 @@ def main():
             max_elements=args.max_claims,
             answer_tokens=args.answer_tokens,
             fallback=args.fallback,
+            verify_objects=args.verify_objects,
         )
 
     elif args.pipeline == "react":
@@ -263,7 +272,11 @@ def main():
             print(f"[{sample['id']}] failed: {type(error).__name__}: {error}")
 
             result = {
+                # An empty answer is written so the sample is not silently
+                # counted as answered; the error travels with it so a crash is
+                # visible in the record instead of looking like a blank model.
                 "answer": "",
+                "error": f"{type(error).__name__}: {error}",
                 "trace": [],
                 "fallback": True,
                 "tool_calls": tools.calls,
@@ -307,7 +320,15 @@ def main():
             "cgr_repaired_uses": result.get("repaired_uses"),
             "cgr_repaired_violations": result.get("repaired_violations"),
             "cgr_fallback_reason": result.get("fallback_reason"),
+            "cgr_error": result.get("error"),
+            "cgr_cited_evidence": result.get("cited_evidence"),
+            "cgr_completed": (result.get("plan") or {}).get("completed"),
+            "cgr_dropped_by_verification": result.get("dropped_by_verification"),
+            "cgr_judge_readable": result.get("judge_readable"),
             "cgr_fallback_mode": args.fallback if args.pipeline == "cgv2" else None,
+            "cgr_verify_objects": (
+                args.verify_objects if args.pipeline == "cgv2" else None
+            ),
             "cgr_steps": result.get("steps"),
             "cgr_plan": result.get("plan"),
             "cgr_grounded": result.get("grounded"),

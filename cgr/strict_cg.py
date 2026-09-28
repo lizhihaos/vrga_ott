@@ -105,8 +105,36 @@ ATTRIBUTE_HINTS = (
     ("what is written", "text"),
 )
 
+# Words that carry no fact of their own. Everything else in an answer has to be
+# traceable to a supported element, which is what stops an answer from
+# introducing the value the evidence does not contain.
+GENERIC = {
+    "the", "and", "are", "but", "can", "cannot", "could", "does", "for",
+    "from", "has", "have", "image", "into", "its", "not", "only", "other",
+    "show", "shows", "than", "that", "their", "them", "there", "these",
+    "they", "this", "those", "visible", "was", "were", "which", "while",
+    "with", "without", "would", "yes", "answer", "question", "appears",
+    "appear", "seems", "seem", "because", "about", "above", "across",
+    "after", "also", "any", "both", "each", "either", "enough", "even",
+    "every", "here", "however", "itself", "more", "most", "much", "neither",
+    "never", "none", "nor", "nothing", "one", "two", "three", "four",
+    "five", "six", "seven", "eight", "nine", "ten", "some", "such", "then",
+    "therefore", "unclear", "unknown", "where", "whether", "yet", "given",
+    "provide", "provided", "provides", "determine", "determined", "evidence",
+    "insufficient", "enough", "cannot", "unable", "possible", "possibly",
+}
+
 REFUSAL = (
     "The image does not provide enough evidence to answer this question."
+)
+
+# A refusal that names what it is refusing about scores the way the answers do.
+# HaloQuest's ground truth for a false premise is "there is no ball in the
+# image", and the generic sentence was judged wrong against it on three of the
+# nineteen samples whose old answers scored right.
+REFUSAL_TEMPLATE = (
+    "The image does not show the {attribute} of the {entity}, so it cannot be "
+    "answered from the image."
 )
 
 PLAN_PROMPT = """You are given an image and a question about it.
@@ -162,7 +190,7 @@ ANSWER_PROMPT = """Question: {question}
 The image was checked against the scene graph for this question. This is all
 that is known:
 
-Holds in the image:
+Holds in the image, and the only things you may state:
 {supported}
 
 Contradicted by the image, the image shows something else where this was asked:
@@ -173,20 +201,45 @@ Not settled by the image, either not found or not a property an image can show:
 
 Answer the question using only the first list.
 - You cannot see the image. Anything not written above is unknown to you.
-- Say plainly that the image does not show it when the answer would need
-  anything from the other two lists.
+- Answer in one full sentence, the way the question expects.
+- When the answer would need anything from the other two lists, answer exactly:
+  "The image does not show what the question asks about."
 - Do not mention a contradicted or unsettled value, not even to deny it.
 
-Then list what your answer asserts, so it can be checked:
-- "uses" holds every object, attribute value and relation the answer states.
-- An answer that only declines to answer uses an empty list.
+Every word of your answer has to come from the first list. Do not introduce an
+object, a colour, a number or a relation that is not written there.
+
+Then give the numbers of the facts you used.
 
 Return JSON only:
-{{"answer": "<the answer the question expects>", "uses": ["<what it asserts>"]}}
+{{"answer": "<the answer the question expects>", "evidence": [<numbers from the first list>]}}
 
 Question: {question}
 
 JSON:"""
+
+VERIFY_PROMPT = """Question: {question}
+
+What the image holds:
+{supported}
+
+What the image contradicts:
+{refuted}
+
+What the image cannot settle:
+{unknown}
+
+An answer was written from those facts:
+
+{answer}
+
+Is every factual claim in that answer supported by what the image holds?
+- An answer that declines to answer, because the facts do not provide it, is
+  supported.
+- A claim that contradicts the image, or that names something none of the three
+  lists mention, is not supported.
+
+Answer only YES or NO."""
 
 REPAIR_PROMPT = """Question: {question}
 
@@ -198,11 +251,11 @@ of it are not supported:
 Everything known about the image:
 {supported}
 
-Rewrite the answer so that everything it asserts is in that list, and say the
+Rewrite the answer so that every word of it appears in that list, and say the
 image does not show it for the rest. You cannot see the image.
 
 Return JSON only:
-{{"answer": "<the answer>", "uses": ["<what it asserts>"]}}
+{{"answer": "<the answer>", "evidence": [<numbers from the list>]}}
 
 Question: {question}
 
@@ -376,12 +429,20 @@ class StrictGroundedCCoT:
     """Plan what to read, ground it, and answer from the evidence alone."""
 
     def __init__(self, tools, max_elements=6, answer_tokens=400,
-                 fallback="refuse"):
+                 fallback="refuse", verify_objects=False):
 
         self.tools = tools
         self.max_elements = max_elements
         self.answer_tokens = answer_tokens
         self.fallback = fallback
+
+        # Off by default: asking a model "does this crop show a bottom stripe
+        # of the rainbow" is unreliable on phrase-like names, and a rejected
+        # instance takes the whole element with it, which cost 18 of 19 samples
+        # their evidence in the first run that had it on.
+        self.verify_objects = verify_objects
+        self.dropped_by_verification = 0
+        self.last_judge_readable = None
 
     # ========================================================
     # Instances
@@ -397,6 +458,18 @@ class StrictGroundedCCoT:
         query, selector = split_selector(name)
 
         found = self.tools.locate(image, query)
+
+        # A box is not an object: the locator returns one for everything it is
+        # asked about, so on an absent object the pipeline checks the place
+        # where it would be. Optionally each crop is shown back to the model
+        # first, which is the only thing here that can say "there is no tree".
+        if self.verify_objects:
+
+            before = len(found)
+
+            found = self.tools.verify_object(image, found, query)
+
+            self.dropped_by_verification += before - len(found)
 
         cache[name] = select_instance(found, selector)
 
@@ -540,15 +613,13 @@ class StrictGroundedCCoT:
 
                 verdicts = []
 
-                for box_a in first_boxes:
-                    for box_b in second_boxes:
-
-                        box_a, box_b = box_a["box"], box_b["box"]
+                for item_a in first_boxes:
+                    for item_b in second_boxes:
 
                         verdicts.append(
                             self.tools.relate(
-                                image, box_a, first,
-                                element["relation"], box_b, second,
+                                image, item_a["box"], first,
+                                element["relation"], item_b["box"], second,
                             )
                         )
 
@@ -653,39 +724,129 @@ class StrictGroundedCCoT:
 
         return [term for term in terms if term]
 
-    def check(self, uses, grounded):
+    def check(self, answer, cited, grounded, question, facts):
 
-        """Which of the things the answer asserts the image does not hold.
+        """Whether the answer stays inside what the image holds.
 
-        A declared item is traced against the text of the SUPPORTED elements,
-        which already carry the object, the attribute and the value read from
-        the image. Matching against REFUTED text is worse than not matching at
-        all, because those lines read "the bottom stripe is not orange" and
-        would otherwise license the value they deny.
+        Two passes:
+
+        1. Structural: the cited evidence numbers must exist and point at
+           SUPPORTED elements. Numbers rather than quoted text, because text
+           can be copied verbatim into a claim and then trivially "match" the
+           line it copied, which is how a hallucinated sentence passed the
+           earlier version.
+
+        2. Semantic: a call that reads the facts and the answer together and
+           names any claim the facts do not carry. A word list was tried here
+           first and it failed in both directions: it rejected the refusal
+           sentence the prompt itself asks for ("what the question asks about"
+           is not a word any evidence line contains), and it could not tell a
+           refusal from an assertion that reused the question's words. Whether
+           a sentence claims something is a question about meaning.
+
+        The refuted values keep a lexical guard as well, because naming a value
+        the image contradicts is an error no reading of the facts can excuse.
         """
 
-        supported = self._supported_terms(grounded)
+        supported_elements = [
+            item for item in grounded if item["verdict"] == "SUPPORTED"
+        ]
+
         refuted = self._refuted_terms(grounded)
 
         violations = []
 
-        for use in uses:
+        for number in cited:
 
-            term = normalise(use)
+            if not isinstance(number, int) or not 1 <= number <= len(supported_elements):
 
-            if not term:
+                violations.append({
+                    "item": f"cited evidence {number}",
+                    "kind": "not a fact that holds",
+                })
+
+        lowered = normalise(answer)
+
+        for term in refuted:
+
+            words = [word for word in term.split() if len(word) > 3]
+
+            if not words:
                 continue
 
-            if any(term in other or other in term for other in supported):
-                continue
+            # Only a whole phrase counts: "the bottom stripe is not orange"
+            # contains orange, and the answer naming orange is the mistake.
+            if term[:24] and term[:24] in lowered and "not " not in lowered:
 
-            kind = "contradicted" if any(
-                term in other or other in term for other in refuted
-            ) else "unsupported"
+                violations.append({"item": term[:40], "kind": "contradicted"})
 
-            violations.append({"item": use, "kind": kind})
+        verdict = self._judge(question, answer, facts)
+
+        self.last_judge_readable = verdict.get("readable")
+
+        if not verdict["ok"]:
+
+            violations.append({
+                "item": (
+                    "; ".join(verdict["unsupported"])
+                    or "the answer as written"
+                ),
+                "kind": "not supported by the facts",
+            })
 
         return violations
+
+    def _judge(self, question, answer, facts):
+
+        """Whether the answer stays inside the facts. Yes or no, nothing else.
+
+        A JSON verdict was tried first and the model could not produce it: an
+        unreadable reply was treated as a failure, every draft then failed, and
+        the run answered the generic refusal to all 19 samples. YES/NO is what
+        the rest of this codebase's checks use and what a 3B model answers
+        reliably.
+
+        An unreadable verdict does not veto. The structural checks -- the cited
+        numbers and the contradicted values -- still stand on their own, and a
+        verifier that cannot speak must not be able to turn the pipeline into a
+        refusal machine.
+        """
+
+        prompt = (
+            VERIFY_PROMPT
+            .replace("{question}", question.strip())
+            .replace("{supported}", facts["supported"])
+            .replace("{refuted}", facts["refuted"])
+            .replace("{unknown}", facts["unknown"])
+            .replace("{answer}", answer)
+        )
+
+        try:
+
+            reply = self.tools.generate(None, prompt, max_new_tokens=8)
+
+        except (ValueError, KeyError, TypeError) as error:
+
+            return {"ok": True, "unsupported": [], "readable": False,
+                    "error": str(error)}
+
+        match = re.search(r"\b(yes|no)\b", str(reply).strip().lower())
+
+        if match is None:
+
+            return {"ok": True, "unsupported": [], "readable": False,
+                    "error": str(reply)[:60]}
+
+        if match.group(1) == "yes":
+
+            return {"ok": True, "unsupported": [], "readable": True}
+
+        return {
+            "ok": False,
+            "unsupported": [],
+            "readable": True,
+            "error": "",
+        }
 
     def _parse_answer(self, reply):
 
@@ -699,12 +860,21 @@ class StrictGroundedCCoT:
         if not answer:
             return None
 
-        uses = data.get("uses") or []
+        cited = data.get("evidence") or []
 
-        if isinstance(uses, str):
-            uses = [uses]
+        if isinstance(cited, (int, str)):
+            cited = [cited]
 
-        return {"answer": answer, "uses": [str(use) for use in uses][:12]}
+        numbers = []
+
+        for item in cited:
+
+            try:
+                numbers.append(int(item))
+            except (TypeError, ValueError):
+                continue
+
+        return {"answer": answer, "cited": numbers[:12]}
 
     # ========================================================
     # Plan, with a retry and a floor under it
@@ -786,6 +956,70 @@ class StrictGroundedCCoT:
             "raw": "minimal plan",
         }
 
+    def complete_plan(self, plan, question):
+
+        """Add the property the question asks for when the plan left it out.
+
+        A plan of one object element grounds existence and nothing else, and the
+        answer step is then asked a question the evidence says nothing about:
+        id=16 got "the dog is sitting" out of "1 dog found". The target carries
+        the question's own property, so it is the one element worth trusting to
+        be about the question, and it is added when the plan forgets it.
+        """
+
+        target = plan.get("target") or {}
+
+        entity = normalise(target.get("entity", ""))
+        attribute = normalise(target.get("attribute", ""))
+
+        if not entity or not attribute or not is_visual(attribute):
+            return plan
+
+        for element in plan["elements"]:
+
+            if element["kind"] != "attribute":
+                continue
+
+            existing = normalise(element.get("attribute", ""))
+
+            if existing and (
+                attribute[:4] in existing or existing[:4] in attribute
+            ):
+                return plan
+
+        names = [
+            element["name"] for element in plan["elements"]
+            if element["kind"] == "object"
+        ]
+
+        # The attribute belongs to the entity the question is about, so when the
+        # plan grounded something else the entity is added as its own element:
+        # attaching the property to the plan's first object made id=12 check
+        # "the light color of the motorcycle" for a question about a man.
+        subject = next(
+            (name for name in names if entity[:4] in name or name[:4] in entity),
+            None,
+        )
+
+        if subject is None:
+
+            subject = entity
+
+            plan["elements"] = plan["elements"] + [{
+                "kind": "object",
+                "name": entity,
+            }]
+
+        plan["elements"] = plan["elements"] + [{
+            "kind": "attribute",
+            "subject": subject,
+            "attribute": attribute,
+        }]
+
+        plan["completed"] = attribute
+
+        return plan
+
     # ========================================================
     # Entry point
     # ========================================================
@@ -801,6 +1035,8 @@ class StrictGroundedCCoT:
 
             return self._fallback(image, question, record, "no plan")
 
+        plan = self.complete_plan(plan, question)
+
         record["plan"] = plan
 
         grounded, cache = self.ground(image, plan)
@@ -813,6 +1049,7 @@ class StrictGroundedCCoT:
         record["rejected"] = sum(
             1 for item in grounded if item["verdict"] != "SUPPORTED"
         )
+        record["dropped_by_verification"] = self.dropped_by_verification
         record["verdict_counts"] = {
             verdict: sum(1 for item in grounded if item["verdict"] == verdict)
             for verdict in VERDICTS
@@ -836,9 +1073,25 @@ class StrictGroundedCCoT:
                 if item["verdict"] == verdict
             ]
 
-        supported = "\n".join(lines("SUPPORTED")) or "- (none)"
+        # Numbered, because the answer cites the numbers rather than repeating
+        # the text: free text can be copied verbatim into a claim and then
+        # "match" the evidence it copied, which is how a hallucinated sentence
+        # passed the first version of this check.
+        supported = "\n".join(
+            f"{index}. {item['evidence']} ({item['kind']})"
+            for index, item in enumerate(
+                [item for item in grounded if item["verdict"] == "SUPPORTED"],
+                start=1,
+            )
+        ) or "- (none)"
         refuted = "\n".join(lines("REFUTED")) or "- (none)"
         unknown = "\n".join(lines("UNKNOWN")) or "- (none)"
+
+        facts = {
+            "supported": supported,
+            "refuted": refuted,
+            "unknown": unknown,
+        }
 
         prompt = (
             ANSWER_PROMPT
@@ -857,17 +1110,20 @@ class StrictGroundedCCoT:
 
         if parsed is None:
 
-            return self._finish(record, REFUSAL, [], [], "unparsable answer")
+            return self._finish(record, self.refusal(plan), [], [], "unparsable answer")
 
-        violations = self.check(parsed["uses"], grounded)
+        violations = self.check(
+            parsed["answer"], parsed["cited"], grounded, question, facts
+        )
 
-        record["uses"] = parsed["uses"]
+        record["cited_evidence"] = parsed["cited"]
+        record["judge_readable"] = self.last_judge_readable
         record["violations"] = violations
 
         if not violations:
 
             return self._finish(
-                record, parsed["answer"], parsed["uses"], [], "clean"
+                record, parsed["answer"], parsed["cited"], [], "clean"
             )
 
         violation_lines = "\n".join(
@@ -887,25 +1143,49 @@ class StrictGroundedCCoT:
 
         if repaired is not None:
 
-            again = self.check(repaired["uses"], grounded)
+            again = self.check(
+                repaired["answer"], repaired["cited"], grounded, question, facts
+            )
 
-            record["repaired_uses"] = repaired["uses"]
+            record["repaired_uses"] = repaired["answer"]
             record["repaired_violations"] = again
 
             if not again:
 
                 return self._finish(
-                    record, repaired["answer"], repaired["uses"],
+                    record, repaired["answer"], repaired["cited"],
                     violations, "repaired",
                 )
 
-        return self._finish(record, REFUSAL, [], violations, "refused")
+        return self._finish(record, self.refusal(plan), [], violations, "refused")
 
     # ========================================================
     # Finishing
     # ========================================================
 
-    def _finish(self, record, answer, uses, violations, outcome):
+    def refusal(self, plan):
+
+        """The sentence to answer with when the facts do not provide one."""
+
+        target = (plan or {}).get("target") or {}
+
+        entity = str(target.get("entity", "")).strip()
+        attribute = str(target.get("attribute", "")).strip()
+
+        if entity and attribute and is_visual(attribute):
+
+            return REFUSAL_TEMPLATE.format(entity=entity, attribute=attribute)
+
+        if entity:
+
+            return (
+                f"The image does not show the {entity}, so it cannot be "
+                f"answered from the image."
+            )
+
+        return REFUSAL
+
+    def _finish(self, record, answer, cited, violations, outcome):
 
         record["answer"] = answer
         record["tool_calls"] = self.tools.calls
@@ -914,7 +1194,7 @@ class StrictGroundedCCoT:
         record["trace"].append({
             "tool": "answer",
             "outcome": outcome,
-            "uses": uses,
+            "evidence": cited,
             "violations": violations,
         })
 
@@ -927,6 +1207,7 @@ class StrictGroundedCCoT:
         record["grounded"] = []
         record["boxes"] = {}
         record["rejected"] = 0
+        record["dropped_by_verification"] = self.dropped_by_verification
         record["verdict_counts"] = {verdict: 0 for verdict in VERDICTS}
         record["tool_calls"] = self.tools.calls
 

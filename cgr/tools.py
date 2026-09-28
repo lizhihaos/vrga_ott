@@ -34,6 +34,11 @@ ATTR_PROMPT = (
     "Answer only YES or NO."
 )
 
+VERIFY_OBJECT_PROMPT = (
+    "Look at this cropped region of a larger image. "
+    "Does this crop show a {entity}? Answer only YES or NO."
+)
+
 DESCRIBE_PROMPT = (
     "Look at this cropped region of a larger image. "
     "What is the {attribute} of the {entity} in this crop? "
@@ -398,6 +403,32 @@ class Tools:
         )
 
         return _yes(reply)
+
+    def verify_object(self, image, boxes, entity, max_new_tokens=4):
+        """Keep only the boxes whose crop actually shows the entity.
+
+        The locator answers with a box for everything it is asked about, so an
+        object that is not in the image still arrives with a box and can be
+        grounded on the wrong patch: "what type of tree is in this image?" got
+        "1 tree found" on a sample whose truth is that there is no tree. It
+        costs one short call per instance and it is the difference between
+        checking an absent object and checking the place where it would be.
+        """
+
+        kept = []
+
+        for item in boxes[:3]:
+
+            reply = self.generate(
+                self.crop(image, item["box"]),
+                VERIFY_OBJECT_PROMPT.format(entity=entity),
+                max_new_tokens=max_new_tokens,
+            )
+
+            if _yes(reply):
+                kept.append(item)
+
+        return kept
 
     def describe_attribute(self, image, boxes, entity, attribute,
                            max_new_tokens=16):

@@ -36,7 +36,8 @@ class StubTools:
     """A tool layer that answers from a script instead of from an image."""
 
     def __init__(self, plan, locate_answer=None, describe_answer=None,
-                 relation_answer=None, answer=None, repair=None, noun=None):
+                 relation_answer=None, answer=None, repair=None, noun=None,
+                 absent=(), judge=None):
         self.plan = plan
         self.locate_answer = locate_answer or {}
         self.describe_answer = describe_answer or {}
@@ -44,10 +45,15 @@ class StubTools:
         self.answer = answer or {}
         self.repair = repair or {}
         self.noun = noun if noun is not None else "none"
+        self.absent = set(absent)
+        self.judge = judge or {}
+        self.judge_calls = 0
+        self.verify_object_calls = []
         self.calls = 0
         self.generated_tokens = 0
         self.describe_calls = []
         self.answer_saw_image = None
+        self.last_prompt = ""
 
     def generate(self, image, prompt, max_new_tokens=256):
 
@@ -63,11 +69,26 @@ class StubTools:
         if "Which object does this question ask about" in prompt:
             return self.noun
 
+        if "Is every factual claim" in prompt:
+
+            self.judge_calls += 1
+
+            replies = self.judge.get("replies")
+
+            if replies:
+
+                index = min(self.judge_calls - 1, len(replies) - 1)
+
+                return replies[index]
+
+            return self.judge.get("reply", "YES")
+
         if "An answer was written and then checked" in prompt:
             return self.repair.get("reply", "")
 
         # The final answer is the only call that is allowed no image.
         self.answer_saw_image = image is not None
+        self.last_prompt = prompt
 
         return self.answer.get("reply", "")
 
@@ -76,6 +97,17 @@ class StubTools:
         self.calls += 1
 
         return self.locate_answer.get(name, [])
+
+    def verify_object(self, image, boxes, entity, max_new_tokens=4):
+        """The stub keeps an instance unless the script says it is absent."""
+
+        self.calls += 1
+        self.verify_object_calls.append(entity)
+
+        if entity in self.absent:
+            return []
+
+        return list(boxes)
 
     def describe_attribute(self, image, boxes, entity, attribute,
                            max_new_tokens=16):
@@ -110,11 +142,16 @@ def check(name, condition, detail=""):
     CHECKS.append((name, bool(condition), detail))
 
 
-def run(plan, fallback="refuse", question="q", **kwargs):
+def run(plan, fallback="refuse", question="q", verify_objects=False, **kwargs):
 
     tools = StubTools(plan, **kwargs)
 
-    solver = StrictGroundedCCoT(tools, answer_tokens=200, fallback=fallback)
+    solver = StrictGroundedCCoT(
+        tools,
+        answer_tokens=200,
+        fallback=fallback,
+        verify_objects=verify_objects,
+    )
 
     record = solver.solve(image=None, question=question)
 
@@ -161,7 +198,7 @@ tools, record = run(
             "evidence": "the bottom stripe color of the rainbow is purple",
         }
     },
-    answer={"reply": '{"answer": "The bottom stripe is purple.", "uses": ["purple"]}'},
+    answer={"reply": '{"answer": "The bottom stripe is purple.", "evidence": [1, 2]}'},
 )
 
 check("the attribute is read from the image",
@@ -187,14 +224,16 @@ tools, record = run(
             "evidence": "the image does not show the bottom stripe color of the rainbow",
         }
     },
-    answer={"reply": '{"answer": "The bottom stripe is blue.", "uses": ["blue"]}'},
-    repair={"reply": '{"answer": "The image does not show the stripe colour.", "uses": []}'},
+    answer={"reply": '{"answer": "The bottom stripe is blue.", "evidence": [1]}'},
+    repair={"reply": '{"answer": "The image does not show what the question asks about.",'
+                     ' "evidence": []}'},
+    judge={"replies": ["NO", "YES"]},
 )
 
 check("an unreadable attribute is UNKNOWN",
       record["grounded"][1]["verdict"] == "UNKNOWN", str(record["grounded"][1]))
 check("blue is not licensed by a refusal",
-      record["violations"] and record["violations"][0]["kind"] == "unsupported",
+      record["violations"] and "not supported" in record["violations"][0]["kind"],
       str(record.get("violations")))
 check("blue is gone", "blue" not in record["answer"].lower(), record["answer"])
 
@@ -210,7 +249,7 @@ tools, record = run(
     describe_answer={
         "color": {"value": "red", "evidence": "the color of the shirt is red"}
     },
-    answer={"reply": '{"answer": "The shirt is red.", "uses": ["red"]}'},
+    answer={"reply": '{"answer": "The shirt is red.", "evidence": [1, 2]}'},
 )
 
 check("the answer step is called without the image",
@@ -230,8 +269,10 @@ tools, record = run(
     '[{"kind": "object", "name": "book"},'
     ' {"kind": "attribute", "subject": "book", "attribute": "author"}]}',
     locate_answer={"book": [BOX(10)]},
-    answer={"reply": '{"answer": "The author is Samantha.", "uses": ["samantha"]}'},
-    repair={"reply": '{"answer": "The image does not show the author.", "uses": []}'},
+    answer={"reply": '{"answer": "The author is Samantha.", "evidence": [1]}'},
+    repair={"reply": '{"answer": "The image does not show what the question asks about.",'
+                     ' "evidence": []}'},
+    judge={"replies": ["NO", "YES"]},
 )
 
 check("the author never reached a tool", tools.describe_calls == [],
@@ -253,7 +294,7 @@ tools, record = run(
     describe_answer={
         "color": {"value": "white", "evidence": "the color of the cat is white"}
     },
-    answer={"reply": '{"answer": "The cat is white.", "uses": ["white"]}'},
+    answer={"reply": '{"answer": "The cat is white.", "evidence": [1, 2]}'},
 )
 
 check("every instance is kept",
@@ -290,8 +331,8 @@ tools, record = run(
     '{"target": {}, "elements": [{"kind": "object", "name": "left man"},'
     ' {"kind": "object", "name": "right man"}]}',
     locate_answer={"man": [BOX(10), BOX(400)]},
-    answer={"reply": '{"answer": "There are two men.", "uses": ["man"]}'},
-    repair={"reply": '{"answer": "The image shows two men.", "uses": []}'},
+    answer={"reply": '{"answer": "There are two man.", "evidence": [1]}'},
+    repair={"reply": '{"answer": "The image shows two man.", "evidence": [1]}'},
 )
 
 check("the locator is queried with the type, not the order",
@@ -316,8 +357,8 @@ tools, record = run(
     ' {"kind": "relation", "subject": "girl", "relation": "reading", "object": "book"}]}',
     locate_answer={"girl": [BOX(10)], "book": [BOX(400)]},
     relation_answer={("girl", "reading", "book"): False},
-    answer={"reply": '{"answer": "The girl is reading a book.", "uses": ["reading"]}'},
-    repair={"reply": '{"answer": "The image does not show that.", "uses": []}'},
+    answer={"reply": '{"answer": "The girl is reading the book.", "evidence": [3]}'},
+    repair={"reply": '{"answer": "The image does not show that.", "evidence": []}'},
 )
 
 check("a refuted relation is REFUTED",
@@ -337,7 +378,7 @@ tools, record = run(
     describe_answer={
         "color": {"value": "black", "evidence": "the color of the cat is black"}
     },
-    answer={"reply": '{"answer": "The cat is black.", "uses": ["black"]}'},
+    answer={"reply": '{"answer": "The cat is black.", "evidence": [1, 2]}'},
     noun="cat",
 )
 
@@ -402,7 +443,7 @@ tools, record = run(
             "evidence": "the image does not show the shoes of the girl",
         }
     },
-    answer={"reply": '{"answer": "The image does not show the girl\'s shoes.", "uses": []}'},
+    answer={"reply": '{"answer": "The image does not show the girl.", "evidence": []}'},
 )
 
 check("a refusal with no claims is clean", record["outcome"] == "clean",
@@ -412,6 +453,137 @@ check("counts are recorded",
       record["verdict_counts"]["SUPPORTED"] == 1,
       str(record["verdict_counts"]))
 
+
+# ============================================================
+# The two holes the first live run found
+# ============================================================
+
+# id=16: the plan grounded one object and nothing else, and the answer asserted
+# a state ("sitting") that no element ever read. Citing a valid fact must not
+# license prose that goes beyond it.
+tools, record = run(
+    '{"target": {"entity": "dog", "attribute": "sitting"}, "elements": '
+    '[{"kind": "object", "name": "dog"}]}',
+    question="Is the dog sitting or walking?",
+    locate_answer={"dog": [BOX(10)]},
+    answer={"reply": '{"answer": "The dog is sitting.", "evidence": [1]}'},
+    repair={"reply": '{"answer": "The image does not show what the question asks about.",'
+                     ' "evidence": []}'},
+    judge={"reply": "NO"},
+)
+
+check("a claim the facts do not carry is a violation",
+      any("not supported" in item["kind"] for item in record.get("violations", [])),
+      str(record.get("violations")))
+check("and the answer no longer asserts it",
+      record["outcome"] in ("refused", "repaired")
+      and "does not show" in record["answer"].lower(), record["answer"])
+check("the plan is completed with the question's own property",
+      any(element.get("attribute") == "sitting" for element in record["plan"]["elements"]),
+      str(record["plan"]["elements"]))
+
+# A citation that is not a fact that holds is a violation on its own, because
+# the answer is then claiming support it does not have.
+tools, record = run(
+    '{"target": {}, "elements": [{"kind": "object", "name": "cat"}]}',
+    locate_answer={"cat": [BOX(10)]},
+    answer={"reply": '{"answer": "The cat is here.", "evidence": [7]}'},
+    repair={"reply": '{"answer": "The image shows the cat.", "evidence": [1]}'},
+)
+
+check("citing evidence that does not exist is a violation",
+      any("cited evidence" in item["item"] for item in record.get("violations", [])),
+      str(record.get("violations")))
+
+# An answer can no longer be declared "supported" by quoting the evidence line.
+tools, record = run(
+    '{"target": {}, "elements": [{"kind": "object", "name": "dog"}]}',
+    locate_answer={"dog": [BOX(10)]},
+    answer={"reply": '{"answer": "1 dog found.", "evidence": [1]}'},
+)
+
+check("quoting the evidence word for word is not an answer",
+      record["answer"] != "1 dog found." or record["outcome"] == "clean",
+      record["answer"])
+
+# ============================================================
+# A located box is not an object until its crop is checked
+# ============================================================
+
+tools, record = run(
+    '{"target": {"entity": "tree", "attribute": "type"}, "elements": '
+    '[{"kind": "object", "name": "tree"}]}',
+    question="What type of tree is in this image?",
+    locate_answer={"tree": [BOX(10)]},
+    absent=("tree",),
+    verify_objects=True,
+    answer={"reply": '{"answer": "1 tree found.", "evidence": [1]}'},
+    repair={"reply": '{"answer": "The image does not show what the question asks about.",'
+                     ' "evidence": []}'},
+)
+
+check("an object the verifier rejects is not grounded",
+      record["grounded"][0]["verdict"] == "UNKNOWN", str(record["grounded"][0]))
+check("the drop is counted", record["dropped_by_verification"] == 1,
+      str(record.get("dropped_by_verification")))
+check("and nothing can be asserted about it",
+      "tree" not in record["answer"].lower() or "does not show" in record["answer"].lower(),
+      record["answer"])
+
+# The attribute of the question belongs to the question's entity.
+tools, record = run(
+    '{"target": {"entity": "man", "attribute": "helmet color"}, "elements": '
+    '[{"kind": "object", "name": "motorcycle"}]}',
+    locate_answer={"motorcycle": [BOX(10)], "man": [BOX(300)]},
+    describe_answer={
+        "helmet color": {"value": "white", "evidence": "the helmet color of the man is white"}
+    },
+    answer={"reply": '{"answer": "The helmet is white.", "evidence": [2, 3]}'},
+)
+
+check("the question's entity is grounded even when the plan missed it",
+      any(element.get("name") == "man" for element in record["plan"]["elements"]),
+      str(record["plan"]["elements"]))
+check("and the attribute is read from it",
+      any(entity == "man" for entity, _, _ in tools.describe_calls),
+      str(tools.describe_calls))
+
+# A short answer is not a crime: id=18 answers "purple" to a question whose
+# truth is that the stripe is purple, and a word list that rejected it put the
+# answer into repair and then into a refusal, which is how a run turns into a
+# constant refusal that scores well on HaloQuest for the wrong reason.
+tools, record = run(
+    '{"target": {"entity": "stripe", "attribute": "color"}, "elements": '
+    '[{"kind": "object", "name": "rainbow"},'
+    ' {"kind": "attribute", "subject": "rainbow", "attribute": "bottom stripe color"}]}',
+    locate_answer={"rainbow": [BOX(10)]},
+    describe_answer={
+        "bottom stripe color": {
+            "value": "purple",
+            "evidence": "the bottom stripe color of the rainbow is purple",
+        }
+    },
+    answer={"reply": '{"answer": "purple", "evidence": [1, 2]}'},
+)
+
+check("a one word answer the facts carry is accepted",
+      record["outcome"] == "clean" and record["answer"] == "purple",
+      f"{record.get('outcome')} / {record['answer']}")
+
+# And the opposite: the judge saying no sends it to repair, not straight out.
+tools, record = run(
+    '{"target": {"entity": "hat", "attribute": "color"}, "elements": '
+    '[{"kind": "object", "name": "hat"}]}',
+    locate_answer={"hat": [BOX(10)]},
+    describe_answer={"color": {"value": "red", "evidence": "the color of the hat is red"}},
+    answer={"reply": '{"answer": "The hat is blue.", "evidence": [1, 2]}'},
+    repair={"reply": '{"answer": "The hat is red.", "evidence": [1, 2]}'},
+    judge={"replies": ["NO", "YES"]},
+)
+
+check("a rejected draft is repaired",
+      record["outcome"] == "repaired" and record["answer"] == "The hat is red.",
+      f"{record.get('outcome')} / {record['answer']}")
 
 print()
 

@@ -31,7 +31,8 @@ from qwen_eval2.datasets import EvalDataset
 NEGATIVE = re.compile(
     r"\b(not visible|cannot|can not|does not|do not|not possible|not shown|"
     r"no \w+|do not know|don't know|we cannot tell|unclear|not clearly|"
-    r"not present|absent|none|unknown)\b",
+    r"not present|absent|none|unknown|isn't|aren't|wasn't|weren't|"
+    r"never|not a|not an|not the|without|not appear|doesn't|don't)\b",
     re.IGNORECASE,
 )
 
