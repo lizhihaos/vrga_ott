@@ -311,7 +311,14 @@ def main():
             "cgr_steps": result.get("steps"),
             "cgr_plan": result.get("plan"),
             "cgr_grounded": result.get("grounded"),
-            "cgr_boxed": result.get("boxes"),
+            # Downstream formatters read cgr_boxed as one box per name, so the
+            # first instance stays there and the full set goes beside it.
+            "cgr_boxed": {
+                name: boxes[0]
+                for name, boxes in (result.get("boxes") or {}).items()
+                if boxes
+            },
+            "cgr_instances": result.get("boxes"),
             "cgr_candidates": result.get("candidates"),
             "cgr_chosen": result.get("chosen"),
             "cgr_graph": result.get("graph"),

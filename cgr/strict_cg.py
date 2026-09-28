@@ -1,40 +1,53 @@
-"""Strict grounded CCoT: verdicts that constrain the answer, not just describe it.
+"""Strict grounded CCoT: check what the question asks, then answer from evidence.
 
-The first version of this pipeline grounds every element of the plan and then
-hands the answer model two lists, one of what holds and one of what does not.
-Measured on the first 19 HaloQuest samples, that is not enough, and the failures
-are all of one kind: the verdict is computed, printed, and then ignored.
+The first version grounds the plan and then hands the answer model two lists.
+Measured on the first 19 HaloQuest samples, the verdicts are computed, printed,
+and then ignored, and one structural reason sits behind most of the failures:
+the plan is allowed to contain the answer.
 
-    id=8   plan writes book.title = samantha       (the answer, guessed)
-           grounding refutes it                    (rejected = 1)
-           answer still says "the author is Samantha"
+    id=8   plan writes book.title = samantha, grounding refutes it, and the
+           answer still says Samantha
+    id=15  hat colour = black is refuted, the answer says the hat is black
+    id=17  the answer asserts a banana no element ever grounded
+    id=18  the plan writes bottom stripe = orange, grounding refutes orange,
+           and the answer moves to blue, which nothing supports
 
-    id=15  hat colour = black is refuted, answer says "the hat is black"
-    id=17  answer asserts a banana that no element ever grounded
-    id=18  orange is refuted, answer moves to "blue", which nothing supports
+A plan that carries a value turns the verifier into a check of the model's own
+guess: refuting orange licenses nothing, and the hole that opens is what the
+answer model fills. So the value is removed from the plan entirely, and the
+grounding call is changed from "is it orange" to "what colour is it". The plan
+says what has to be read off the image; the image supplies the value.
 
-Four things follow from those, and this module is those four:
+Six changes, in the order they matter:
 
-1. Three verdicts instead of two. NOT_SUPPORTED conflates "the image shows
-   something else" with "the image cannot settle this", and the answer step
-   reads the second as licence to guess. REFUTED and UNKNOWN are separated.
+1. No value in the plan. An attribute element names a property to read
+   ("bottom stripe color"), never a candidate for it.
 
-2. An observability gate at the plan. A property no image can settle (a book's
-   author, a newspaper's title) is never sent to a tool, because a tool that
-   cannot see it will still answer, and the answer then looks verified. It is
-   UNKNOWN by construction. This is where the laundering in id=8 starts.
+2. describe_attribute instead of verify_attribute. "Is the bottom stripe
+   orange" can only refute the plan's guess; "what colour is the bottom
+   stripe" reads the value from the image, and a refusal is UNKNOWN.
 
-3. The answer must declare what it asserts, and every declared item has to
-   trace to a SUPPORTED element. A claim that traces to REFUTED is a
-   contradiction, one that traces to nothing is unsupported; either is a
-   violation, repaired once, then answered conservatively. This is what stops
-   id=15, id=17 and id=18.
+3. Three verdicts. NOT_SUPPORTED conflated "the image shows something else"
+   with "the image cannot settle this", and the answer step read the second as
+   licence to guess.
 
-4. A fallback that does not free-generate. When the plan cannot be parsed the
-   first version falls back to a plain answer, and on id=7 that produced purple
-   alien trees for a question whose truth is "there is no tree". The fallback
-   here refuses instead, and the choice is recorded so the two can be told
-   apart in the results.
+4. Multi-instance entities. Three cats is a set, and keeping only the first
+   box silently verified every later attribute on one cat. Instances are kept
+   as a set, attributes are read across them, and relations are tried over the
+   pairs.
+
+5. Identity separate from position. "left man" is not an entity name: it is the
+   entity "man" plus an ordering, and querying the locator with "left man"
+   returned two boxes for both the left and the right one. The selector is
+   stripped before the query and applied to the instances geometrically.
+
+6. An answer that cannot look at the image. Evidence is the only input, so a
+   value that is not in the evidence graph has nowhere to come from, and a
+   declared assertion that traces to nothing is caught before it is recorded.
+
+The fallback follows the same logic: the plan is retried, then reduced to the
+question's own object, and only then refused. Free generation on a failed plan
+produced purple alien trees for a question whose truth is that there is no tree.
 """
 
 import json
@@ -44,9 +57,9 @@ from .schema import extract_json
 
 VERDICTS = ("SUPPORTED", "REFUTED", "UNKNOWN")
 
-# Properties an image cannot settle. Sending them to a tool invites a guess:
-# the tool is asked "is the author Samantha" and answers, and the guess comes
-# back wearing a verdict. They are UNKNOWN without a call.
+# Properties an image cannot settle. Asking about them invites a guess: the
+# tool cannot see an author but will still answer, and the answer comes back
+# wearing a verdict. They are UNKNOWN without a call.
 NON_VISUAL = {
     "author", "brand", "date", "identity", "language", "meaning", "name",
     "nationality", "occupation", "owner", "price", "purpose", "reason", "time",
@@ -54,50 +67,112 @@ NON_VISUAL = {
     "cost", "value", "intention", "relationship", "history",
 }
 
+# Ordering words that read as part of an entity name but are really an
+# attribute of the set: "left man", "smaller animal". Stripped before the
+# locator is queried and applied to the instances afterwards.
+SELECTORS = (
+    "left", "right", "top", "bottom", "upper", "lower", "middle", "center",
+    "smaller", "larger", "bigger", "taller", "shorter", "first", "second",
+    "third", "front", "back", "nearest", "closest",
+)
+
+POSITION_WORDS = {
+    "position", "side", "location", "place", "left", "right", "top", "bottom",
+    "middle", "center", "centre", "front", "back", "leftmost", "rightmost",
+}
+
+# Words that describe where an attribute sits inside the question rather than
+# what it is, and are ignored when deciding whether it is a position.
+POSITION_FILLER = {"of", "the", "its", "a", "an", "subject", "object"}
+
+# The minimal plan has no model-written attribute, so the question itself is
+# read for one. Only the properties it can name unambiguously are listed: the
+# point of the floor is to check something, not to guess.
+ATTRIBUTE_HINTS = (
+    ("how many", "count"),
+    ("what color", "color"),
+    ("what colour", "color"),
+    ("color of", "color"),
+    ("colour of", "color"),
+    ("what type", "type"),
+    ("what kind", "type"),
+    ("what material", "material"),
+    ("what shape", "shape"),
+    ("what design", "design"),
+    ("what is the name", "text"),
+    ("who is", "identity"),
+    ("where is", "position"),
+    ("what is written", "text"),
+)
+
 REFUSAL = (
     "The image does not provide enough evidence to answer this question."
 )
 
 PLAN_PROMPT = """You are given an image and a question about it.
-Write the scene graph needed to answer the question: which objects are involved, which of their attributes the question asks about, and how they relate.
+Write what has to be checked in the image in order to answer the question. Do not answer it.
 
 Return JSON only:
 {"target": {"entity": "<what the question asks about>", "attribute": "<which property>"},
  "elements": [
    {"kind": "object", "name": "<object, short lowercase noun>"},
-   {"kind": "attribute", "subject": "<object name>", "attribute": "<property>", "value": "<value>"},
+   {"kind": "attribute", "subject": "<object name>", "attribute": "<property to read>"},
    {"kind": "relation", "subject": "<object name>", "relation": "<relation>", "object": "<object name>"}
  ]}
 
 Rules:
-- Only elements the question actually needs, at most six.
+- At most six elements, only what the question needs.
 - An object element is what has to be found in the image.
-- An attribute element is a property the question asks about or states.
-- Write an attribute value only if it is a property of the image: a colour,
-  shape, material, count, position or clothing. Never write a value you would
-  have to read, look up or guess, such as a name, title, author, brand or date;
-  for those write "value": "unknown".
-- A relation element connects two objects the question relates.
+- An attribute element names a property to READ OFF the image, such as color,
+  material, count, shape or position. Never write the value: the value is the
+  thing being asked for, and a value written here would be checked against the
+  image instead of read from it.
+- Write an attribute of a part as the property of the whole: for "the bottom
+  stripe of the rainbow", subject "rainbow", attribute "bottom stripe color".
+- One object appearing several times keeps one name for the type; do not put
+  left, right, first or smaller into the name.
+- Write only properties an image could show. Never ask for a name, title,
+  author, brand or date.
 - Use the same object names everywhere, short lowercase nouns without articles.
 
 Question: {question}
 
 JSON:"""
 
+PLAN_RETRY_PROMPT = """Your previous reply could not be read as JSON.
+
+Return JSON only, no prose and no code fence:
+{"target": {"entity": "<what the question asks about>", "attribute": "<which property>"},
+ "elements": [{"kind": "object", "name": "<object>"}]}
+
+Question: {question}
+
+JSON:"""
+
+TARGET_PROMPT = """Question: {question}
+
+Which object does this question ask about? Answer with one short lowercase noun
+only, such as "cat" or "book". If the question asks about no object at all,
+answer exactly: NONE
+
+Answer:"""
+
 ANSWER_PROMPT = """Question: {question}
 
-The image was checked against the scene graph for this question.
+The image was checked against the scene graph for this question. This is all
+that is known:
 
 Holds in the image:
 {supported}
 
-Contradicted by the image, the image shows something else here:
+Contradicted by the image, the image shows something else where this was asked:
 {refuted}
 
 Not settled by the image, either not found or not a property an image can show:
 {unknown}
 
-Answer the question from what holds.
+Answer the question using only the first list.
+- You cannot see the image. Anything not written above is unknown to you.
 - Say plainly that the image does not show it when the answer would need
   anything from the other two lists.
 - Do not mention a contradicted or unsettled value, not even to deny it.
@@ -116,15 +191,15 @@ JSON:"""
 REPAIR_PROMPT = """Question: {question}
 
 An answer was written and then checked against what the image holds. These parts
-of it are not supported by the image:
+of it are not supported:
 
 {violations}
 
-What the image holds:
+Everything known about the image:
 {supported}
 
 Rewrite the answer so that everything it asserts is in that list, and say the
-image does not show it for the rest. Keep the format the question expects.
+image does not show it for the rest. You cannot see the image.
 
 Return JSON only:
 {{"answer": "<the answer>", "uses": ["<what it asserts>"]}}
@@ -139,6 +214,37 @@ def normalise(text):
     return re.sub(r"[^a-z0-9 ]+", " ", str(text).lower()).strip()
 
 
+def is_positional(attribute):
+
+    """Whether the attribute is a position rather than a readable property.
+
+    A word match is not enough: "bottom" appears in "bottom stripe color",
+    which is a colour to read off the image, and routing it here skipped the
+    read entirely. Only an attribute made of position words is one.
+    """
+
+    words = [
+        word for word in normalise(attribute).split()
+        if word not in POSITION_FILLER
+    ]
+
+    return bool(words) and all(word in POSITION_WORDS for word in words)
+
+
+def attribute_from_question(question):
+
+    """The property a question asks for, when it names one outright."""
+
+    lowered = normalise(question)
+
+    for phrase, attribute in ATTRIBUTE_HINTS:
+
+        if phrase in lowered:
+            return attribute
+
+    return ""
+
+
 def is_visual(attribute):
 
     """Whether an image could settle this property at all."""
@@ -149,6 +255,78 @@ def is_visual(attribute):
         return True
 
     return not any(word in NON_VISUAL for word in attribute.split())
+
+
+def split_selector(name):
+
+    """("man", "left") out of "left man"; (name, None) when there is no order.
+
+    The order is a property of the set, not part of the type: querying a
+    locator for "left man" asks it to find the phrase, and it answers with both
+    men, which is how id=12 ended up with two boxes for "left man" and two for
+    "right man".
+    """
+
+    words = normalise(name).split()
+
+    found = [word for word in words if word in SELECTORS]
+
+    remaining = [word for word in words if word not in SELECTORS]
+
+    if not found or not remaining:
+        return name, None
+
+    return " ".join(remaining), found[0]
+
+
+def select_instance(instances, selector):
+
+    """The instance an ordering word picks out, geometrically.
+
+    `instances` are the locator's own records, each with a "box" key, because
+    that is what every caller holds.
+    """
+
+    if not instances:
+        return []
+
+    if selector is None:
+        return instances
+
+    def centre(item):
+        box = item["box"]
+        return ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+
+    def area(item):
+        box = item["box"]
+        return abs((box[2] - box[0]) * (box[3] - box[1]))
+
+    choosers = {
+        "left": lambda: min(instances, key=lambda item: centre(item)[0]),
+        "right": lambda: max(instances, key=lambda item: centre(item)[0]),
+        "top": lambda: min(instances, key=lambda item: centre(item)[1]),
+        "upper": lambda: min(instances, key=lambda item: centre(item)[1]),
+        "bottom": lambda: max(instances, key=lambda item: centre(item)[1]),
+        "lower": lambda: max(instances, key=lambda item: centre(item)[1]),
+        "smaller": lambda: min(instances, key=area),
+        "shorter": lambda: min(instances, key=area),
+        "larger": lambda: max(instances, key=area),
+        "bigger": lambda: max(instances, key=area),
+        "taller": lambda: max(instances, key=area),
+        "first": lambda: instances[0],
+        "second": lambda: instances[1] if len(instances) > 1 else instances[0],
+        "third": lambda: instances[2] if len(instances) > 2 else instances[-1],
+        "middle": lambda: instances[len(instances) // 2],
+        "center": lambda: instances[len(instances) // 2],
+        "centre": lambda: instances[len(instances) // 2],
+    }
+
+    for word in (selector, "middle", "center"):
+        chooser = choosers.get(word)
+        if chooser is not None:
+            return [chooser()]
+
+    return instances
 
 
 def parse_plan(reply):
@@ -172,7 +350,6 @@ def parse_plan(reply):
                 "kind": "attribute",
                 "subject": str(item["subject"]).lower(),
                 "attribute": str(item.get("attribute", "")).lower(),
-                "value": str(item.get("value", "")).lower(),
             })
 
         elif kind == "relation" and item.get("subject") and item.get("object"):
@@ -196,7 +373,7 @@ def parse_plan(reply):
 
 
 class StrictGroundedCCoT:
-    """Plan, ground every element into three verdicts, answer from evidence."""
+    """Plan what to read, ground it, and answer from the evidence alone."""
 
     def __init__(self, tools, max_elements=6, answer_tokens=400,
                  fallback="refuse"):
@@ -207,24 +384,31 @@ class StrictGroundedCCoT:
         self.fallback = fallback
 
     # ========================================================
+    # Instances
+    # ========================================================
+
+    def instances(self, image, name, cache):
+
+        """Every box for an entity, and never one box for a set of them."""
+
+        if name in cache:
+            return cache[name]
+
+        query, selector = split_selector(name)
+
+        found = self.tools.locate(image, query)
+
+        cache[name] = select_instance(found, selector)
+
+        return cache[name]
+
+    # ========================================================
     # Grounding
     # ========================================================
 
-    def _locate(self, image, name, boxes):
-
-        if name in boxes:
-            return boxes[name]
-
-        found = self.tools.locate(image, name)
-
-        if found:
-            boxes[name] = found[0]["box"]
-
-        return boxes.get(name)
-
     def ground(self, image, plan):
 
-        boxes = {}
+        cache = {}
         grounded = []
 
         for element in plan["elements"]:
@@ -234,19 +418,15 @@ class StrictGroundedCCoT:
             # ------------------------------------------------
             # object: is it in the image at all
             #
-            # A tool that finds nothing is not proof of absence: the detector
-            # misses small and unusual things, so "no dog found" is UNKNOWN
-            # rather than "the image contradicts a dog". REFUTED is kept for a
-            # check that positively saw something else.
+            # A tool that finds nothing is not proof of absence, so that is
+            # UNKNOWN rather than "the image contradicts a cat". REFUTED is
+            # kept for a check that positively saw something else.
             # ------------------------------------------------
 
             if kind == "object":
 
                 name = element["name"]
-                found = self.tools.locate(image, name)
-
-                if found:
-                    boxes[name] = found[0]["box"]
+                found = self.instances(image, name, cache)
 
                 grounded.append({
                     **element,
@@ -261,18 +441,15 @@ class StrictGroundedCCoT:
                 continue
 
             # ------------------------------------------------
-            # attribute: does the located object hold it
+            # attribute: read the property off the image
             # ------------------------------------------------
 
             if kind == "attribute":
 
                 subject = element["subject"]
                 attribute = element["attribute"]
-                value = element["value"]
 
-                # The question asks for something no image can show. Asking a
-                # tool anyway is how a guess acquires a verdict.
-                if not is_visual(attribute) or not is_visual(value):
+                if not is_visual(attribute):
 
                     grounded.append({
                         **element,
@@ -285,72 +462,158 @@ class StrictGroundedCCoT:
 
                     continue
 
-                if self._locate(image, subject, boxes) is None:
+                found = self.instances(image, subject, cache)
+
+                if not found:
 
                     grounded.append({
                         **element,
                         "verdict": "UNKNOWN",
-                        "evidence": f"no {subject} located to check",
+                        "evidence": f"no {subject} found to read the {attribute} from",
                     })
 
                     continue
 
-                ok = self.tools.verify_attribute(
-                    image, boxes[subject], subject,
-                    attribute or "attribute",
-                    value,
-                )
+                # ------------------------------------------------
+                # Position is not read by a model, it is computed from the
+                # boxes: asking a VLM which of two similar instances is the
+                # left one is how "left man" and "right man" got the same box.
+                # ------------------------------------------------
+
+                if is_positional(attribute):
+
+                    read = self._read_position(image, subject, found)
+
+                else:
+
+                    read = self.tools.describe_attribute(
+                        image, [box["box"] for box in found], subject, attribute
+                    )
+
+                if read.get("value") is None:
+
+                    grounded.append({
+                        **element,
+                        "verdict": "UNKNOWN",
+                        "evidence": read.get("evidence", f"no {attribute} read"),
+                    })
+
+                    continue
 
                 grounded.append({
                     **element,
-                    "verdict": "SUPPORTED" if ok else "REFUTED",
-                    "evidence": (
-                        f"the {subject} is {value}" if ok
-                        else f"the {subject} is not {value}"
-                    ),
+                    "value": read["value"],
+                    "verdict": "SUPPORTED",
+                    "evidence": read["evidence"],
+                    "boxes": len(found),
                 })
 
                 continue
 
             # ------------------------------------------------
-            # relation: is it true of the two located objects
+            # relation: true of the instances
+            #
+            # Both sides existing does not make the edge true, so the edge is
+            # checked, over every pair when a side has several instances: any
+            # pair holding is enough to support it, and only all pairs failing
+            # refutes it.
             # ------------------------------------------------
 
             if kind == "relation":
 
                 first, second = element["subject"], element["object"]
 
-                if self._locate(image, first, boxes) is None or \
-                        self._locate(image, second, boxes) is None:
+                first_boxes = self.instances(image, first, cache)[:3]
+                second_boxes = self.instances(image, second, cache)[:3]
 
-                    missing = (
-                        first if first not in boxes else second
-                    )
+                if not first_boxes or not second_boxes:
+
+                    missing = first if not first_boxes else second
 
                     grounded.append({
                         **element,
                         "verdict": "UNKNOWN",
-                        "evidence": f"no {missing} located to check",
+                        "evidence": f"no {missing} found to check the relation",
                     })
 
                     continue
 
-                ok = self.tools.relate(
-                    image, boxes[first], first,
-                    element["relation"], boxes[second], second,
-                )
+                verdicts = []
+
+                for box_a in first_boxes:
+                    for box_b in second_boxes:
+
+                        box_a, box_b = box_a["box"], box_b["box"]
+
+                        verdicts.append(
+                            self.tools.relate(
+                                image, box_a, first,
+                                element["relation"], box_b, second,
+                            )
+                        )
+
+                held = any(verdicts)
 
                 grounded.append({
                     **element,
-                    "verdict": "SUPPORTED" if ok else "REFUTED",
+                    "verdict": "SUPPORTED" if held else "REFUTED",
                     "evidence": (
                         f"the {first} is {element['relation']} the {second}"
-                        if ok else
+                        if held else
                         f"the {first} is not {element['relation']} the {second}"
                     ),
+                    "pairs": len(verdicts),
                 })
 
-        return grounded, boxes
+        return grounded, cache
+
+    def _read_position(self, image, subject, found):
+
+        """The ordering of the instances, from their boxes.
+
+        Position is not read by a model: asking a VLM which of two similar
+        instances is the left one is how "left man" and "right man" came back
+        with the same box. Which instance the question means is decided by the
+        selector in its name, see `split_selector`; what is recorded here is
+        the fact that the set has an order at all, so the answer can say
+        "the left one" about a set the evidence describes.
+        """
+
+        if len(found) < 2:
+
+            return {
+                "value": None,
+                "evidence": (
+                    f"only one {subject} in the image, so it has no position "
+                    f"relative to another"
+                ),
+            }
+
+        ordered = sorted(
+            found,
+            key=lambda item: (item["box"][0] + item["box"][2]) / 2,
+        )
+
+        labels = []
+
+        for rank in range(len(ordered)):
+
+            if rank == 0:
+                labels.append("leftmost")
+            elif rank == len(ordered) - 1:
+                labels.append("rightmost")
+            else:
+                labels.append(f"middle {rank}")
+
+        value = "left to right: " + ", ".join(labels)
+
+        return {
+            "value": value,
+            "evidence": (
+                f"the image holds {len(found)} {subject}, ordered left to "
+                f"right as {', '.join(labels)}"
+            ),
+        }
 
     # ========================================================
     # Answer constraint
@@ -394,12 +657,11 @@ class StrictGroundedCCoT:
 
         """Which of the things the answer asserts the image does not hold.
 
-        A declared item is checked against the text of the SUPPORTED elements:
-        evidence lines already carry the object, the attribute and the value, so
-        a substring match in either direction is enough to trace it. Matching
-        against REFUTED evidence is worse than not matching at all, because
-        those lines read "the bottom stripe is not orange" and would otherwise
-        license the value they deny.
+        A declared item is traced against the text of the SUPPORTED elements,
+        which already carry the object, the attribute and the value read from
+        the image. Matching against REFUTED text is worse than not matching at
+        all, because those lines read "the bottom stripe is not orange" and
+        would otherwise license the value they deny.
         """
 
         supported = self._supported_terms(grounded)
@@ -414,15 +676,11 @@ class StrictGroundedCCoT:
             if not term:
                 continue
 
-            if any(
-                term in other or other in term
-                for other in supported
-            ):
+            if any(term in other or other in term for other in supported):
                 continue
 
             kind = "contradicted" if any(
-                term in other or other in term
-                for other in refuted
+                term in other or other in term for other in refuted
             ) else "unsupported"
 
             violations.append({"item": use, "kind": kind})
@@ -446,10 +704,86 @@ class StrictGroundedCCoT:
         if isinstance(uses, str):
             uses = [uses]
 
+        return {"answer": answer, "uses": [str(use) for use in uses][:12]}
+
+    # ========================================================
+    # Plan, with a retry and a floor under it
+    # ========================================================
+
+    def _plan(self, image, question, trace):
+
+        for name, prompt in (
+            ("plan", PLAN_PROMPT),
+            ("plan-retry", PLAN_RETRY_PROMPT),
+        ):
+
+            try:
+
+                reply = self.tools.generate(
+                    image,
+                    prompt.replace("{question}", question.strip()),
+                    max_new_tokens=512,
+                )
+
+                plan = parse_plan(reply)
+
+            except (ValueError, KeyError, TypeError) as error:
+
+                trace.append({"tool": name, "error": str(error)})
+                continue
+
+            trace.append({"tool": name, "elements": len(plan["elements"])})
+
+            if plan["elements"]:
+                return plan
+
+        # ----------------------------------------------------
+        # The floor: the question's own object, nothing guessed
+        # ----------------------------------------------------
+
+        try:
+
+            noun = self.tools.generate(
+                image,
+                TARGET_PROMPT.replace("{question}", question.strip()),
+                max_new_tokens=12,
+            ).strip().lower()
+
+        except (ValueError, KeyError, TypeError):
+
+            return None
+
+        noun = re.sub(r"[^a-z ]+", "", noun).strip()
+
+        if not noun or noun in ("none", "no object"):
+
+            return None
+
+        attribute = attribute_from_question(question)
+
+        elements = [{"kind": "object", "name": noun}]
+
+        # Without this the floor can only check that the object exists, and a
+        # question about its colour is answered "the image does not provide
+        # enough evidence" even though the colour could have been read.
+        if attribute and is_visual(attribute):
+
+            elements.append({
+                "kind": "attribute",
+                "subject": noun,
+                "attribute": attribute,
+            })
+
+        trace.append({
+            "tool": "plan-minimal",
+            "entity": noun,
+            "attribute": attribute,
+        })
+
         return {
-            "answer": answer,
-            "uses": [str(use) for use in uses][:12],
-            "raw": reply[:600],
+            "target": {"entity": noun, "attribute": attribute},
+            "elements": elements,
+            "raw": "minimal plan",
         }
 
     # ========================================================
@@ -461,43 +795,21 @@ class StrictGroundedCCoT:
         record = {"trace": [], "fallback": False}
         trace = record["trace"]
 
-        # ----------------------------------------------------
-        # 1. Plan
-        # ----------------------------------------------------
+        plan = self._plan(image, question, trace)
 
-        try:
+        if plan is None:
 
-            reply = self.tools.generate(
-                image,
-                PLAN_PROMPT.replace("{question}", question.strip()),
-                max_new_tokens=512,
-            )
-
-            plan = parse_plan(reply)
-
-        except (ValueError, KeyError, TypeError) as error:
-
-            return self._fallback(image, question, record, str(error))
+            return self._fallback(image, question, record, "no plan")
 
         record["plan"] = plan
-        trace.append({"tool": "plan", "elements": len(plan["elements"])})
 
-        # ----------------------------------------------------
-        # 2. Ground every element
-        #
-        # An empty plan means the question needs no visual structure. There is
-        # nothing to check the answer against, so answering it here is the
-        # unconstrained generation this pipeline exists to avoid.
-        # ----------------------------------------------------
-
-        if not plan["elements"]:
-
-            return self._fallback(image, question, record, "empty plan")
-
-        grounded, boxes = self.ground(image, plan)
+        grounded, cache = self.ground(image, plan)
 
         record["grounded"] = grounded
-        record["boxes"] = boxes
+        record["boxes"] = {
+            name: [box["box"] for box in boxes]
+            for name, boxes in cache.items()
+        }
         record["rejected"] = sum(
             1 for item in grounded if item["verdict"] != "SUPPORTED"
         )
@@ -513,26 +825,20 @@ class StrictGroundedCCoT:
         })
 
         # ----------------------------------------------------
-        # 3. Answer from the grounded graph, and check the answer
+        # Answer from the evidence, without the image
         # ----------------------------------------------------
 
-        def lists():
+        def lines(verdict):
 
-            def lines(verdict):
+            return [
+                f"- {item['evidence']} ({item['kind']})"
+                for item in grounded
+                if item["verdict"] == verdict
+            ]
 
-                return [
-                    f"- {item['evidence']} ({item['kind']})"
-                    for item in grounded
-                    if item["verdict"] == verdict
-                ]
-
-            return (
-                "\n".join(lines("SUPPORTED")) or "- (none)",
-                "\n".join(lines("REFUTED")) or "- (none)",
-                "\n".join(lines("UNKNOWN")) or "- (none)",
-            )
-
-        supported, refuted, unknown = lists()
+        supported = "\n".join(lines("SUPPORTED")) or "- (none)"
+        refuted = "\n".join(lines("REFUTED")) or "- (none)"
+        unknown = "\n".join(lines("UNKNOWN")) or "- (none)"
 
         prompt = (
             ANSWER_PROMPT
@@ -542,8 +848,9 @@ class StrictGroundedCCoT:
             .replace("{unknown}", unknown)
         )
 
+        # No image: an answer that cannot see is an answer that cannot invent.
         parsed = self._parse_answer(
-            self.tools.generate(image, prompt, max_new_tokens=self.answer_tokens)
+            self.tools.generate(None, prompt, max_new_tokens=self.answer_tokens)
         )
 
         record["tool_calls"] = self.tools.calls
@@ -563,22 +870,13 @@ class StrictGroundedCCoT:
                 record, parsed["answer"], parsed["uses"], [], "clean"
             )
 
-        # ----------------------------------------------------
-        # 4. One repair, then refuse
-        #
-        # Repairing is a generation with the violations named, so it can fail
-        # the same way. When it does, the conservative answer is a refusal, not
-        # the unconstrained answer: a claim the evidence does not carry is the
-        # failure this pipeline is meant to prevent.
-        # ----------------------------------------------------
-
         violation_lines = "\n".join(
             f"- {item['item']} ({item['kind']})" for item in violations
         )
 
         repaired = self._parse_answer(
             self.tools.generate(
-                image,
+                None,
                 (REPAIR_PROMPT
                  .replace("{question}", question.strip())
                  .replace("{violations}", violation_lines)
@@ -627,6 +925,7 @@ class StrictGroundedCCoT:
         record["fallback"] = True
         record["fallback_reason"] = reason
         record["grounded"] = []
+        record["boxes"] = {}
         record["rejected"] = 0
         record["verdict_counts"] = {verdict: 0 for verdict in VERDICTS}
         record["tool_calls"] = self.tools.calls
@@ -639,8 +938,8 @@ class StrictGroundedCCoT:
         else:
 
             # An answer generated here has nothing to be checked against, and
-            # on the samples where this path was taken with free generation the
-            # result was a confident hallucination.
+            # on the samples where this path used free generation the result
+            # was a confident hallucination.
             record["answer"] = REFUSAL
             record["outcome"] = "fallback-refuse"
 

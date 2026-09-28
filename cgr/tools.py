@@ -34,6 +34,13 @@ ATTR_PROMPT = (
     "Answer only YES or NO."
 )
 
+DESCRIBE_PROMPT = (
+    "Look at this cropped region of a larger image. "
+    "What is the {attribute} of the {entity} in this crop? "
+    "Answer with the value only, at most three words. "
+    "If the crop does not show it, answer exactly: NONE"
+)
+
 RELATION_PROMPT = (
     "Look at this cropped region of a larger image. "
     "It contains a {a_entity} and a {b_entity}. "
@@ -55,6 +62,47 @@ INSPECT_PROMPT = (
     "question is about.\n\nQuestion: {question}\n\n"
     "Answer the question using only what is visible in this crop."
 )
+
+
+def _clean_value(text):
+    """The value a describe call returned, or None when it declined.
+
+    The prompt asks for a value only, but a small model still wraps it in a
+    sentence, and its refusals vary from "NONE" to "not visible in the crop".
+    Anything that reads as a refusal becomes None, so the caller can tell "the
+    image does not show it" from "it is purple"; a wrapper is stripped so the
+    value that reaches the evidence reads like a value.
+    """
+
+    text = str(text).strip().splitlines()[0] if str(text).strip() else ""
+
+    text = re.sub(r"^[\s\-\*\d\.\)\(]+", "", text)
+    text = text.strip(" \"'`.!*")
+
+    if not text or len(text) > 40:
+        return None
+
+    lowered = text.lower()
+
+    refusals = (
+        "none", "not visible", "cannot", "can not", "unable", "unclear",
+        "unclear", "not shown", "does not show", "unsure", "unknown",
+        "n/a", "n a", "no idea", "not sure", "nothing",
+    )
+
+    if any(phrase in lowered for phrase in refusals):
+        return None
+
+    for wrapper in (
+        r"^(the )?(value|answer|colour|color) is ",
+        r"^it is ",
+        r"^there is (a|an) ",
+        r"^this is (a|an) ",
+    ):
+
+        lowered = re.sub(wrapper, "", lowered).strip()
+
+    return lowered or None
 
 
 def _yes(text):
@@ -350,6 +398,65 @@ class Tools:
         )
 
         return _yes(reply)
+
+    def describe_attribute(self, image, boxes, entity, attribute,
+                           max_new_tokens=16):
+        """What the image shows for an attribute, not whether a guess holds.
+
+        verify_attribute can only ever confirm or refute the value it was
+        handed, so the pipeline had to get a candidate from somewhere, and the
+        somewhere was the plan, i.e. the answer model's own guess. Asking what
+        the attribute is moves the value out of the plan and into the image.
+
+        Several instances are asked one at a time and the first answer that is
+        not a refusal wins: a question about "the cat" in an image with three
+        cats is a question about whichever one shows the attribute.
+        """
+
+        replies = []
+        instances = []
+
+        for box in boxes[:3]:
+
+            crop = self.crop(image, box)
+
+            reply = self.generate(
+                crop,
+                DESCRIBE_PROMPT.format(
+                    entity=entity,
+                    attribute=str(attribute).replace("_", " "),
+                ),
+                max_new_tokens=max_new_tokens,
+            )
+
+            value = _clean_value(reply)
+
+            instances.append({"box": box, "reply": reply, "value": value})
+
+            if value is not None:
+                replies.append(value)
+
+        if not replies:
+
+            return {
+                "value": None,
+                "instances": instances,
+                "evidence": f"the image does not show the {attribute} of the {entity}",
+            }
+
+        # The most common answer across instances, so one odd crop does not
+        # decide it. Ties go to the first, which is the most confident box.
+        counts = {}
+        for value in replies:
+            counts[value] = counts.get(value, 0) + 1
+
+        best = max(replies, key=lambda value: (counts[value], -replies.index(value)))
+
+        return {
+            "value": best,
+            "instances": instances,
+            "evidence": f"the {attribute} of the {entity} is {best}",
+        }
 
     # ========================================================
     # RELATE

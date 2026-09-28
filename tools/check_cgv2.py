@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
-"""Check the strict pipeline's verdict and answer-constraint logic on CPU.
+"""Check the strict pipeline's structure on CPU, with a stub tool layer.
 
-The failures this pipeline is meant to stop are decided in its own code, not in
-the model: whether a contradicted value is refused, whether an ungrounded value
-in the answer is caught, whether an unobservable property ever reaches a tool.
-Those can be tested with a stub tool layer, which runs in seconds and needs no
-GPU, so a logic error is not discovered after an hour of HaloQuest.
-
-The cases are the ones from the first 19 HaloQuest samples:
-
-    id=8   book.title = samantha is refuted, answer says Samantha anyway
-    id=15  hat colour = black is refuted, answer says black
-    id=17  the answer asserts a banana that no element grounded
-    id=18  orange is refuted, the answer moves to blue
-    id=0   shoes are not visible, the answer refuses, which is correct
+The failures this pipeline exists to prevent are decided in its own code: what
+the plan is allowed to contain, whether an attribute is read or guessed,
+whether three cats stay three cats, whether the answer can see the image. All
+of that is testable without a GPU, in seconds, so a structural error is not
+discovered after an hour of HaloQuest.
 
     python tools/check_cgv2.py
 """
@@ -27,41 +19,55 @@ sys.path.insert(
 )
 
 from cgr.strict_cg import (
-    NON_VISUAL,
     REFUSAL,
     StrictGroundedCCoT,
     is_visual,
     parse_plan,
+    select_instance,
+    split_selector,
 )
+
+
+def BOX(x):
+    return {"box": [x, 10, x + 40, 90], "score": 0.9}
 
 
 class StubTools:
     """A tool layer that answers from a script instead of from an image."""
 
-    def __init__(self, plan, locate_answer, verify_answer, relation=None,
-                 answer=None, repair=None):
+    def __init__(self, plan, locate_answer=None, describe_answer=None,
+                 relation_answer=None, answer=None, repair=None, noun=None):
         self.plan = plan
-        self.locate_answer = locate_answer
-        self.verify_answer = verify_answer
-        self.relation_answer = relation or {}
+        self.locate_answer = locate_answer or {}
+        self.describe_answer = describe_answer or {}
+        self.relation_answer = relation_answer or {}
         self.answer = answer or {}
         self.repair = repair or {}
+        self.noun = noun if noun is not None else "none"
         self.calls = 0
         self.generated_tokens = 0
-        self.verify_calls = []
+        self.describe_calls = []
+        self.answer_saw_image = None
 
     def generate(self, image, prompt, max_new_tokens=256):
 
         self.calls += 1
         self.generated_tokens += 10
 
-        # The answer prompt also mentions the scene graph, so route on the
-        # instruction that only the plan prompt carries.
-        if "Write the scene graph needed" in prompt:
+        if "Write what has to be checked" in prompt:
             return self.plan
+
+        if "previous reply could not be read" in prompt:
+            return ""
+
+        if "Which object does this question ask about" in prompt:
+            return self.noun
 
         if "An answer was written and then checked" in prompt:
             return self.repair.get("reply", "")
+
+        # The final answer is the only call that is allowed no image.
+        self.answer_saw_image = image is not None
 
         return self.answer.get("reply", "")
 
@@ -71,12 +77,17 @@ class StubTools:
 
         return self.locate_answer.get(name, [])
 
-    def verify_attribute(self, image, box, subject, attribute, value):
+    def describe_attribute(self, image, boxes, entity, attribute,
+                           max_new_tokens=16):
 
         self.calls += 1
-        self.verify_calls.append((subject, attribute, value))
+        self.describe_calls.append((entity, attribute, len(boxes)))
 
-        return self.verify_answer.get(value, False)
+        return self.describe_answer.get(
+            attribute,
+            {"value": None,
+             "evidence": f"the image does not show the {attribute}"},
+        )
 
     def relate(self, image, box_a, a, relation, box_b, b):
 
@@ -91,8 +102,6 @@ class StubTools:
         return "free generation"
 
 
-BOX = [{"box": [1, 1, 2, 2], "score": 0.9}]
-
 CHECKS = []
 
 
@@ -101,226 +110,307 @@ def check(name, condition, detail=""):
     CHECKS.append((name, bool(condition), detail))
 
 
-def run(plan, locate_answer, verify_answer, answer, repair=None,
-        fallback="refuse"):
+def run(plan, fallback="refuse", question="q", **kwargs):
 
-    tools = StubTools(
-        plan,
-        locate_answer,
-        verify_answer,
-        answer=answer,
-        repair=repair,
-    )
+    tools = StubTools(plan, **kwargs)
 
     solver = StrictGroundedCCoT(tools, answer_tokens=200, fallback=fallback)
 
-    return solver, solver.solve(image=None, question="q")
+    record = solver.solve(image=None, question=question)
+
+    return tools, record
 
 
 # ============================================================
-# The observability gate: an author is never sent to a tool
+# The plan may not carry the answer
 # ============================================================
 
-check("author is not a visual property", not is_visual("author"))
-check("title is not a visual property", not is_visual("title"))
-check("colour is a visual property", is_visual("color"))
-check("material is a visual property", is_visual("material"))
-
-tools = StubTools(
-    plan='{"target": {"entity": "author", "attribute": "name"}, "elements": '
-         '[{"kind": "object", "name": "book"},'
-         ' {"kind": "attribute", "subject": "book", "attribute": "title",'
-         '  "value": "samantha"}]}',
-    locate_answer={"book": BOX},
-    verify_answer={},
-    answer={"reply": '{"answer": "The author is Samantha.", "uses": ["samantha"]}'},
-)
-
-solver = StrictGroundedCCoT(tools, answer_tokens=200)
-
-record = solver.solve(image=None, question="Who is the author of the book?")
-
-check("title never reached a tool", tools.verify_calls == [], str(tools.verify_calls))
-check(
-    "title is UNKNOWN",
-    all(item["verdict"] == "UNKNOWN" for item in record["grounded"]
-        if item["kind"] == "attribute"),
-    str(record["grounded"]),
-)
-check(
-    "Samantha is refused",
-    "Samantha" not in record["answer"],
-    record["answer"],
-)
-check("outcome recorded", record["outcome"] in ("refused", "repaired"),
-      record.get("outcome"))
-
-
-# ============================================================
-# id=15: a refuted attribute may not appear in the answer
-# ============================================================
-
-plan_hat = (
-    '{"target": {"entity": "hat", "attribute": "color"}, "elements": '
-    '[{"kind": "object", "name": "hat"},'
-    ' {"kind": "attribute", "subject": "hat", "attribute": "color",'
-    '  "value": "black"}]}'
-)
-
-solver, record = run(
-    plan_hat,
-    locate_answer={"hat": BOX},
-    verify_answer={"black": False},
-    answer={"reply": '{"answer": "The hat is black.", "uses": ["black"]}'},
-    repair={"reply": '{"answer": "The image does not show the hat\'s colour.",'
-                     ' "uses": []}'},
-)
-
-check("refuted value is a violation", record["violations"] and
-      record["violations"][0]["kind"] == "contradicted", str(record.get("violations")))
-check("repair removed it", "black" not in record["answer"].lower(), record["answer"])
-check("outcome is repaired", record["outcome"] == "repaired", record.get("outcome"))
-
-
-# ============================================================
-# id=15 without a usable repair: refuse rather than assert it
-# ============================================================
-
-solver, record = run(
-    plan_hat,
-    locate_answer={"hat": BOX},
-    verify_answer={"black": False},
-    answer={"reply": '{"answer": "The hat is black.", "uses": ["black"]}'},
-    repair={"reply": '{"answer": "The hat is black.", "uses": ["black"]}'},
-)
-
-check("a failed repair refuses", record["answer"] == REFUSAL, record["answer"])
-check("violation kept for the record", bool(record["violations"]))
-
-
-# ============================================================
-# id=17: an entity the answer asserts is in no grounded element
-# ============================================================
-
-solver, record = run(
-    '{"target": {"entity": "fruit", "attribute": "kind"}, "elements": '
-    '[{"kind": "object", "name": "smaller animal"},'
-    ' {"kind": "attribute", "subject": "smaller animal", "attribute": "tail",'
-    '  "value": "holding"}]}',
-    locate_answer={"smaller animal": BOX},
-    verify_answer={"holding": True},
-    answer={"reply": '{"answer": "It is holding a banana.", "uses": ["banana"]}'},
-    repair={"reply": '{"answer": "It is holding a piece of fruit.", "uses": []}'},
-)
-
-check("ungrounded value is a violation", record["violations"] and
-      record["violations"][0]["kind"] == "unsupported", str(record.get("violations")))
-check("banana is gone", "banana" not in record["answer"].lower(), record["answer"])
-
-
-# ============================================================
-# id=18: refuting orange does not license blue
-# ============================================================
-
-solver, record = run(
-    '{"target": {"entity": "bottom stripe", "attribute": "color"}, "elements": '
+plan = parse_plan(
+    '{"target": {"entity": "stripe", "attribute": "color"}, "elements": '
     '[{"kind": "object", "name": "rainbow"},'
-    ' {"kind": "attribute", "subject": "rainbow", "attribute": "bottom stripe",'
-    '  "value": "orange"}]}',
-    locate_answer={"rainbow": BOX},
-    verify_answer={"orange": False},
-    answer={"reply": '{"answer": "The bottom stripe is blue.", "uses": ["blue"]}'},
-    repair={"reply": '{"answer": "The image does not show the stripe colour.",'
-                     ' "uses": []}'},
+    ' {"kind": "attribute", "subject": "rainbow", "attribute": "bottom stripe color"}]}'
 )
 
-check("blue is unsupported, not licensed", record["violations"] and
-      record["violations"][0]["kind"] == "unsupported", str(record.get("violations")))
+check("the plan keeps what to read",
+      plan["elements"][1]["attribute"] == "bottom stripe color")
+check("the plan has no value field",
+      "value" not in plan["elements"][1], str(plan["elements"][1]))
+
+plan_with_value = parse_plan(
+    '{"target": {}, "elements": [{"kind": "attribute", "subject": "rainbow",'
+    ' "attribute": "bottom stripe color", "value": "orange"}]}'
+)
+
+check("a value written anyway is dropped",
+      "value" not in plan_with_value["elements"][0],
+      str(plan_with_value["elements"][0]))
+
+
+# ============================================================
+# The attribute is read, not guessed
+# ============================================================
+
+tools, record = run(
+    '{"target": {"entity": "stripe", "attribute": "color"}, "elements": '
+    '[{"kind": "object", "name": "rainbow"},'
+    ' {"kind": "attribute", "subject": "rainbow", "attribute": "bottom stripe color"}]}',
+    locate_answer={"rainbow": [BOX(10)]},
+    describe_answer={
+        "bottom stripe color": {
+            "value": "purple",
+            "evidence": "the bottom stripe color of the rainbow is purple",
+        }
+    },
+    answer={"reply": '{"answer": "The bottom stripe is purple.", "uses": ["purple"]}'},
+)
+
+check("the attribute is read from the image",
+      tools.describe_calls == [("rainbow", "bottom stripe color", 1)],
+      str(tools.describe_calls))
+check("the value read becomes the evidence",
+      record["grounded"][1].get("value") == "purple", str(record["grounded"][1]))
+check("an answer using the read value is clean",
+      record["outcome"] == "clean", record.get("outcome"))
+
+
+# ============================================================
+# id=18: a refusal to read is UNKNOWN, and cannot license a value
+# ============================================================
+
+tools, record = run(
+    '{"target": {}, "elements": [{"kind": "object", "name": "rainbow"},'
+    ' {"kind": "attribute", "subject": "rainbow", "attribute": "bottom stripe color"}]}',
+    locate_answer={"rainbow": [BOX(10)]},
+    describe_answer={
+        "bottom stripe color": {
+            "value": None,
+            "evidence": "the image does not show the bottom stripe color of the rainbow",
+        }
+    },
+    answer={"reply": '{"answer": "The bottom stripe is blue.", "uses": ["blue"]}'},
+    repair={"reply": '{"answer": "The image does not show the stripe colour.", "uses": []}'},
+)
+
+check("an unreadable attribute is UNKNOWN",
+      record["grounded"][1]["verdict"] == "UNKNOWN", str(record["grounded"][1]))
+check("blue is not licensed by a refusal",
+      record["violations"] and record["violations"][0]["kind"] == "unsupported",
+      str(record.get("violations")))
 check("blue is gone", "blue" not in record["answer"].lower(), record["answer"])
 
 
 # ============================================================
-# id=0: refusing is the right answer and must pass clean
+# The answer cannot look at the image
 # ============================================================
 
-solver, record = run(
-    '{"target": {"entity": "shoes", "attribute": "type"}, "elements": '
-    '[{"kind": "object", "name": "girl"},'
-    ' {"kind": "attribute", "subject": "girl", "attribute": "shoes",'
-    '  "value": "sandals"}]}',
-    locate_answer={"girl": BOX},
-    verify_answer={"sandals": False},
-    answer={"reply": '{"answer": "The image does not show the girl\'s shoes.",'
-                     ' "uses": []}'},
+tools, record = run(
+    '{"target": {}, "elements": [{"kind": "object", "name": "shirt"},'
+    ' {"kind": "attribute", "subject": "shirt", "attribute": "color"}]}',
+    locate_answer={"shirt": [BOX(10)]},
+    describe_answer={
+        "color": {"value": "red", "evidence": "the color of the shirt is red"}
+    },
+    answer={"reply": '{"answer": "The shirt is red.", "uses": ["red"]}'},
 )
 
-check("a refusal with no claims is clean", record["outcome"] == "clean",
-      record.get("outcome"))
-check("refusal kept", record["answer"].startswith("The image does not show"),
+check("the answer step is called without the image",
+      tools.answer_saw_image is False, str(tools.answer_saw_image))
+
+
+# ============================================================
+# id=8: an author is never sent to a tool, and Samantha cannot come back
+# ============================================================
+
+check("author is not visual", not is_visual("author"))
+check("title is not visual", not is_visual("title"))
+check("color is visual", is_visual("color"))
+
+tools, record = run(
+    '{"target": {"entity": "author", "attribute": "name"}, "elements": '
+    '[{"kind": "object", "name": "book"},'
+    ' {"kind": "attribute", "subject": "book", "attribute": "author"}]}',
+    locate_answer={"book": [BOX(10)]},
+    answer={"reply": '{"answer": "The author is Samantha.", "uses": ["samantha"]}'},
+    repair={"reply": '{"answer": "The image does not show the author.", "uses": []}'},
+)
+
+check("the author never reached a tool", tools.describe_calls == [],
+      str(tools.describe_calls))
+check("the author is UNKNOWN", record["grounded"][1]["verdict"] == "UNKNOWN",
+      str(record["grounded"][1]))
+check("Samantha cannot be asserted", "samantha" not in record["answer"].lower(),
       record["answer"])
 
 
 # ============================================================
-# A supported answer passes and keeps its evidence
+# Three cats stay three cats
 # ============================================================
 
-solver, record = run(
-    '{"target": {"entity": "shirt", "attribute": "color"}, "elements": '
-    '[{"kind": "object", "name": "shirt"},'
-    ' {"kind": "attribute", "subject": "shirt", "attribute": "color",'
-    '  "value": "red"}]}',
-    locate_answer={"shirt": BOX},
-    verify_answer={"red": True},
-    answer={"reply": '{"answer": "The shirt is red.", "uses": ["red"]}'},
+tools, record = run(
+    '{"target": {}, "elements": [{"kind": "object", "name": "cat"},'
+    ' {"kind": "attribute", "subject": "cat", "attribute": "color"}]}',
+    locate_answer={"cat": [BOX(10), BOX(200), BOX(400)]},
+    describe_answer={
+        "color": {"value": "white", "evidence": "the color of the cat is white"}
+    },
+    answer={"reply": '{"answer": "The cat is white.", "uses": ["white"]}'},
 )
 
-check("supported answer is clean", record["outcome"] == "clean", record.get("outcome"))
-check("supported answer kept", record["answer"] == "The shirt is red.", record["answer"])
-check("verdict counts recorded",
-      record["verdict_counts"]["SUPPORTED"] == 2, str(record["verdict_counts"]))
+check("every instance is kept",
+      len(record["boxes"]["cat"]) == 3, str(record["boxes"]))
+check("the attribute is read across the instances",
+      tools.describe_calls == [("cat", "color", 3)], str(tools.describe_calls))
+check("the instance count is in the evidence",
+      "3 cat found" in str(record["grounded"][0]["evidence"]),
+      str(record["grounded"][0]))
 
 
 # ============================================================
-# Fallback: refuse, and only refuse, unless asked otherwise
+# left man is the entity man plus an order, not a name to query
 # ============================================================
 
-solver, record = run(
-    "not json at all",
-    locate_answer={},
-    verify_answer={},
-    answer={"reply": "ignored"},
+check("left man splits", split_selector("left man") == ("man", "left"),
+      str(split_selector("left man")))
+check("smaller animal splits",
+      split_selector("smaller animal") == ("animal", "smaller"),
+      str(split_selector("smaller animal")))
+check("plain man does not split", split_selector("man") == ("man", None),
+      str(split_selector("man")))
+check("a name that is only an order stays whole",
+      split_selector("left") == ("left", None), str(split_selector("left")))
+
+three = [BOX(10), BOX(200), BOX(400)]
+
+check("left picks the leftmost", select_instance(three, "left")[0]["box"][0] == 10,
+      str(select_instance(three, "left")))
+check("right picks the rightmost", select_instance(three, "right")[0]["box"][0] == 400,
+      str(select_instance(three, "right")))
+
+tools, record = run(
+    '{"target": {}, "elements": [{"kind": "object", "name": "left man"},'
+    ' {"kind": "object", "name": "right man"}]}',
+    locate_answer={"man": [BOX(10), BOX(400)]},
+    answer={"reply": '{"answer": "There are two men.", "uses": ["man"]}'},
+    repair={"reply": '{"answer": "The image shows two men.", "uses": []}'},
 )
 
-check("broken plan falls back", record["fallback"])
-check("fallback refuses", record["answer"] == REFUSAL, record["answer"])
-check("fallback answer did not call the model",
-      "free generation" not in record["answer"])
+check("the locator is queried with the type, not the order",
+      "left man" not in tools.describe_calls and
+      len(record["boxes"].get("left man", [])) == 1,
+      str(record["boxes"]))
+check("each side resolves to one instance",
+      len(record["boxes"]["left man"]) == 1 and len(record["boxes"]["right man"]) == 1,
+      str(record["boxes"]))
+check("and they are different instances",
+      record["boxes"]["left man"][0][0] != record["boxes"]["right man"][0][0],
+      str(record["boxes"]))
 
-solver, record = run(
+
+# ============================================================
+# Relations are checked, not inferred from both sides existing
+# ============================================================
+
+tools, record = run(
+    '{"target": {}, "elements": [{"kind": "object", "name": "girl"},'
+    ' {"kind": "object", "name": "book"},'
+    ' {"kind": "relation", "subject": "girl", "relation": "reading", "object": "book"}]}',
+    locate_answer={"girl": [BOX(10)], "book": [BOX(400)]},
+    relation_answer={("girl", "reading", "book"): False},
+    answer={"reply": '{"answer": "The girl is reading a book.", "uses": ["reading"]}'},
+    repair={"reply": '{"answer": "The image does not show that.", "uses": []}'},
+)
+
+check("a refuted relation is REFUTED",
+      record["grounded"][2]["verdict"] == "REFUTED", str(record["grounded"][2]))
+check("its value cannot be asserted", "reading" not in record["answer"].lower(),
+      record["answer"])
+
+
+# ============================================================
+# Fallback: retry the plan, then the question's own object, then refuse
+# ============================================================
+
+tools, record = run(
     "not json at all",
-    locate_answer={},
-    verify_answer={},
-    answer={"reply": "ignored"},
+    question="What color is the cat?",
+    locate_answer={"cat": [BOX(10)]},
+    describe_answer={
+        "color": {"value": "black", "evidence": "the color of the cat is black"}
+    },
+    answer={"reply": '{"answer": "The cat is black.", "uses": ["black"]}'},
+    noun="cat",
+)
+
+check("a broken plan falls to the minimal plan",
+      record["plan"]["raw"] == "minimal plan", str(record.get("plan")))
+check("the minimal plan is the question's object and property",
+      record["plan"]["elements"] == [
+          {"kind": "object", "name": "cat"},
+          {"kind": "attribute", "subject": "cat", "attribute": "color"},
+      ],
+      str(record["plan"]["elements"]))
+check("and it is answered from evidence, not freely",
+      record["answer"] == "The cat is black.", record["answer"])
+check("no free generation happened", "free generation" not in record["answer"])
+
+tools, record = run(
+    "not json at all",
+    question="Who is the author of the book?",
+    locate_answer={"book": [BOX(10)]},
+    answer={"reply": "free generation"},
+    noun="book",
+)
+
+check("a question about something no image can show gets no attribute element",
+      record["plan"]["elements"] == [{"kind": "object", "name": "book"}],
+      str(record["plan"]["elements"]))
+check("and that answer cannot be asserted",
+      "free generation" not in record["answer"], record["answer"])
+
+tools, record = run(
+    "not json at all",
+    noun="none",
+    answer={"reply": "free generation"},
+)
+
+check("no object to fall back to refuses",
+      record["answer"] == REFUSAL and record["fallback"], record["answer"])
+
+tools, record = run(
+    "not json at all",
+    noun="none",
+    locate_answer={"cat": [BOX(10)]},
+    answer={"reply": "free generation"},
     fallback="direct",
 )
 
-check("fallback=direct uses the plain answer",
+check("fallback=direct keeps the old behaviour for comparison",
       record["answer"] == "free generation", record["answer"])
 
 
 # ============================================================
-# Empty plan is not grounded, so it cannot be checked
+# A supported answer still passes, and refusing is not punished
 # ============================================================
 
-solver, record = run(
-    '{"target": {}, "elements": []}',
-    locate_answer={},
-    verify_answer={},
-    answer={"reply": "ignored"},
+tools, record = run(
+    '{"target": {}, "elements": [{"kind": "object", "name": "girl"},'
+    ' {"kind": "attribute", "subject": "girl", "attribute": "shoes"}]}',
+    locate_answer={"girl": [BOX(10)]},
+    describe_answer={
+        "shoes": {
+            "value": None,
+            "evidence": "the image does not show the shoes of the girl",
+        }
+    },
+    answer={"reply": '{"answer": "The image does not show the girl\'s shoes.", "uses": []}'},
 )
 
-check("empty plan falls back", record["fallback"])
-check("empty plan refuses", record["answer"] == REFUSAL, record["answer"])
+check("a refusal with no claims is clean", record["outcome"] == "clean",
+      record.get("outcome"))
+check("counts are recorded",
+      record["verdict_counts"]["UNKNOWN"] == 1 and
+      record["verdict_counts"]["SUPPORTED"] == 1,
+      str(record["verdict_counts"]))
 
 
 print()
@@ -329,7 +419,8 @@ failed = 0
 
 for name, passed, detail in CHECKS:
 
-    print(f"{'ok  ' if passed else 'FAIL'} {name}" + (f"  <- {detail}" if not passed else ""))
+    print(f"{'ok  ' if passed else 'FAIL'} {name}"
+          + (f"  <- {detail}" if not passed else ""))
 
     failed += not passed
 
