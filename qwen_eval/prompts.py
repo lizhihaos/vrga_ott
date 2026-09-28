@@ -1,54 +1,4 @@
-# # ============================================================
-# # Prompt Templates
-# # Direct / CoT / CCoT / ICoT
-# # ============================================================
-# PROMPTS = {
 
-# "direct": """
-# Answer the question based on the image.
-
-# Question:
-# {question}
-
-# Answer:
-# """,
-
-
-# "cot": """
-# Answer the question by reasoning step by step.
-
-# Question:
-# {question}
-
-# Let's think step by step.
-
-# Reasoning:
-# """,
-
-
-# "ccot": """
-# Answer the question with concise reasoning.
-
-# Provide only the necessary reasoning steps.
-
-# Question:
-# {question}
-
-# Reasoning:
-# """,
-
-
-# "icot": """
-# Answer the question using interleaved visual reasoning.
-
-# Alternate between visual observations and reasoning.
-
-# Question:
-# {question}
-
-# Visual Reasoning:
-# """
-# }
 PROMPTS = {
 
 
@@ -72,11 +22,7 @@ Answer:
 # ============================================================
 
 "cot": """
-Analyze the image carefully and solve the question.
-
 Think step by step before giving the final answer.
-Use the information visible in the image.
-
 Question:
 {question}
 

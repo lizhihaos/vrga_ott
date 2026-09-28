@@ -376,7 +376,14 @@ def load_jsonl(path):
 
             ori_response = ""
 
-            if "ori_response" in row:
+            if "direct_response" in row:
+
+                ori_response = get_full_response(
+                    row,
+                    "direct_response"
+                )
+
+            elif "ori_response" in row:
 
                 ori_response = get_full_response(
                     row,
@@ -410,7 +417,14 @@ def load_jsonl(path):
 
             think_response = ""
 
-            if "think_response" in row:
+            if "cot_response" in row:
+
+                think_response = get_full_response(
+                    row,
+                    "cot_response"
+                )
+
+            elif "think_response" in row:
 
                 think_response = get_full_response(
                     row,
