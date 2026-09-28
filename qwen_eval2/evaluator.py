@@ -4,6 +4,7 @@ import os
 from tqdm import tqdm
 
 from .anchoring import (
+    ANCHOR_DEFAULT_MULTIPLY,
     ANCHOR_MODES,
     ANCHOR_PROMPT_MODE,
     ANCHOR_REGION_SOURCE,
@@ -253,8 +254,21 @@ def evaluate(
 
     # One folder per dataset, one file per mode inside it: scoring,
     # re-running a single mode and the resume state all stay independent.
+    #
+    # An anchoring run at a non-default strength is a different experiment on
+    # the same samples, so it gets its own file rather than mixing with the
+    # strength the paper reports.
+    boost_tag = ""
+
+    if (
+        any(mode in ANCHOR_MODES for mode in modes)
+        and anchor_multiply != ANCHOR_DEFAULT_MULTIPLY
+    ):
+
+        boost_tag = f"_boost{anchor_multiply:g}"
+
     tag_by_mode = {
-        mode: f"{mode}{demo_tag}_maxNew{max_new_tokens}"
+        mode: f"{mode}{boost_tag}{demo_tag}_maxNew{max_new_tokens}"
         for mode in modes
     }
 

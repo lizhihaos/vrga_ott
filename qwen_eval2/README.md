@@ -290,6 +290,29 @@ inside the attention call, so no attention matrices are materialised and memory
 does not grow with the prompt. The intervention needs no training and no box
 annotations.
 
+### How much the boost can move the output
+
+`tools/anchor_leverage.py` decodes the same prefix with the boost off and on and
+compares the next-token distributions step by step. On 8 POPE samples with
+Qwen2.5-VL-3B, at 50x the paper's strength:
+
+| Quantity | Value |
+| -------- | ----- |
+| decode steps eligible to apply the anchor | 598 per sample |
+| steps that actually applied it | 126 per sample |
+| mean max change in a logit | 0.83 |
+| mean total variation between the two distributions | 0.022 |
+| samples whose argmax flipped within 24 steps | 3 of 8, first at step 11 |
+
+At the paper's own 1.5x the perturbation is a fraction of that, and the answer
+tokens on POPE are emitted with probability 0.96 to 0.9998. A 0.03 logit change
+cannot move a token that certain, which is why a strength sweep on POPE changes
+no answer even at 50x (`tools/anchor_strength.py`) and why a table of anchored
+rows at 1.5 measures the prompt and not the anchor. The intervention is visible
+where the distribution is flat, i.e. inside long free-form reasoning, so the
+strength question has to be settled before any region source can be compared.
+`runs/run_anchor_boost.sh` runs both sources at 50x for that reason.
+
 ### Region quality
 
 `tools/anchor_region_quality.py` measures where each source points without

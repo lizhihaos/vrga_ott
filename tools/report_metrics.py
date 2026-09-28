@@ -136,6 +136,11 @@ def parse_args():
                              "what an anchoring run spent and covered")
     parser.add_argument("--generations_suffix", type=str, default="maxNew2000",
                         help="Token tag of the generation files to read")
+    parser.add_argument("--intersect", action="store_true",
+                        help="Report every mode on the ids they all share. Needed "
+                             "when a mode was run on a subset of the samples the "
+                             "others cover, e.g. an anchor arm on the first 200 "
+                             "of a file that now holds 1500")
 
     return parser.parse_args()
 
@@ -153,6 +158,56 @@ def load_ground_truth(data_name):
         }
 
     return truth
+
+
+def summarise(results, truth):
+    """Accuracy, its split by ground-truth polarity, and refusal rates.
+
+    Ground-truth polarity decides whether refusing is the right move, which is
+    why it is a column rather than a footnote: a method that declines scores
+    well on negative items for the wrong reason.
+    """
+
+    def negative(record):
+        return is_negative(truth.get(record["id"], {}).get("answer", ""))
+
+    def refused(record):
+        return bool(REFUSAL.search(str(record.get("model_response", ""))))
+
+    def acc(group):
+        return (
+            sum(r["score"] for r in group) / len(group)
+            if group else float("nan")
+        )
+
+    def refusal_rate(group):
+        return (
+            sum(1 for r in group if refused(r)) / len(group)
+            if group else float("nan")
+        )
+
+    neg = [r for r in results if negative(r)]
+    pos = [r for r in results if not negative(r)]
+
+    return {
+        "n": len(results),
+        "acc": acc(results),
+        "acc_neg": acc(neg),
+        "acc_pos": acc(pos),
+        "refusal": refusal_rate(results),
+        "refusal_pos": refusal_rate(pos),
+        "types": {
+            t: (
+                acc([r for r in results
+                     if truth.get(r["id"], {}).get("type") == t]),
+                len([r for r in results
+                     if truth.get(r["id"], {}).get("type") == t]),
+            )
+            for t in sorted(
+                {truth.get(r["id"], {}).get("type", "") for r in results}
+            )
+        },
+    }
 
 
 def main():
@@ -183,41 +238,37 @@ def main():
         if not results:
             continue
 
-        # Ground-truth polarity decides whether refusing is the right move.
-        def negative(r):
-            return is_negative(truth.get(r["id"], {}).get("answer", ""))
-
-        def refused(r):
-            return bool(REFUSAL.search(str(r.get("model_response", ""))))
-
-        neg = [r for r in results if negative(r)]
-        pos = [r for r in results if not negative(r)]
-
-        def acc(group):
-            return sum(r["score"] for r in group) / len(group) if group else float("nan")
-
-        def refusal_rate(group):
-            return sum(1 for r in group if refused(r)) / len(group) if group else float("nan")
-
         rows.append({
             "mode": name[:-5],
-            "n": len(results),
-            "acc": acc(results),
-            "acc_neg": acc(neg),
-            "acc_pos": acc(pos),
-            "refusal": refusal_rate(results),
-            "refusal_pos": refusal_rate(pos),
-            "types": {
-                t: (acc([r for r in results
-                         if truth.get(r["id"], {}).get("type") == t]), 
-                    len([r for r in results if truth.get(r["id"], {}).get("type") == t]))
-                for t in sorted({truth.get(r["id"], {}).get("type", "") for r in results})
-            },
+            "results": results,
             "cost": anchor_cost(args.generations, name[:-5]),
+            **summarise(results, truth),
         })
 
     if not rows:
         raise SystemExit(f"No scored files in {args.scores}")
+
+    # ------------------------------------------------------------
+    # Optionally restrict every mode to the ids they all share
+    # ------------------------------------------------------------
+
+    if args.intersect:
+
+        common = set.intersection(
+            *[{r["id"] for r in row["results"]} for row in rows]
+        )
+
+        for row in rows:
+
+            row.update(
+                summarise(
+                    [r for r in row["results"] if r["id"] in common],
+                    truth,
+                )
+            )
+
+        print()
+        print(f"Restricted to the {len(common)} ids present in every mode.")
 
     neg_share = sum(
         1 for v in truth.values() if is_negative(v["answer"])

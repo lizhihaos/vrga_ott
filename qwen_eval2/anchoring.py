@@ -59,6 +59,11 @@ ANCHOR_REGION_SOURCE = {
     "vrg": "attention",
 }
 
+# The strength the paper uses. A run at any other strength writes to its own
+# file, because the boost is not in the mode name and two strengths of one mode
+# would otherwise share a file and a resume state.
+ANCHOR_DEFAULT_MULTIPLY = 1.5
+
 
 # ============================================================
 # Grounding tool: question -> boxes

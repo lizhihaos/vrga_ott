@@ -83,6 +83,8 @@ All of them work from any directory; each adds the repository root to
 | `viz_grounding.py` | draws the boxes a record produced, plus the crops the verifier saw |
 | `viz_anchor.py` | draws the anchored cells and the box they came from |
 | `anchor_region_quality.py` | measures where each region source points, no judge needed |
+| `anchor_leverage.py` | how far the boost moves the next-token distribution |
+| `anchor_strength.py` | answer changes and accuracy against the boost's size |
 | `check_degeneration.py` | repetition, near-empty and post-injection truncation rates |
 | `check_model_dir.py` | verifies an uploaded checkpoint before spending GPU hours |
 | `report_metrics.py` | per-subset accuracy, refusal rate and anchoring cost |
@@ -95,12 +97,33 @@ All of them work from any directory; each adds the repository root to
 | `run_mmstar_compare.sh` | the current comparison on the MMStar perception subset |
 | `run_mmstar_full.sh` | the four prompt modes on the whole 1500 sample MMStar |
 | `run_pope_anchor.sh` | POPE pilot: controls, both region sources, all three anchor rows |
+| `run_anchor_boost.sh` | both region sources at 50x, where the boost moves the output |
 
 ## Results
 
 Written under `rebuttal/` and ignored by git; regenerate with the pipeline.
 
 ## What the measurements say so far
+
+The intervention's size is the binding constraint, before the region source is
+even in question. `tools/anchor_leverage.py`, 8 POPE samples, Qwen2.5-VL-3B,
+boost at 50x the paper's strength:
+
+| Quantity | Value |
+| -------- | ----- |
+| decode steps eligible to apply the anchor | 598 per sample |
+| steps that applied it | 126 per sample |
+| mean max change in a logit | 0.83 |
+| mean total variation between the distributions | 0.022 |
+| samples whose argmax flipped within 24 steps | 3 of 8 |
+
+At the paper's 1.5x the change is a fraction of this, and POPE's answer tokens
+carry probability 0.96 to 0.9998. A boost that shifts a logit by ~0.03 cannot
+move a token that certain, so a short-answer benchmark is flat under any region
+source; `tools/anchor_strength.py` confirms it, changing no answer at 50x on 20
+samples. Whatever the anchoring rows show at 1.5 is the prompt, not the anchor.
+`runs/run_anchor_boost.sh` re-runs both sources at 50x, where the intervention
+does move the reasoning.
 
 Where each region source points, 120 POPE samples, Qwen2.5-VL-3B, measured
 against the tool's own box and checked by eye with `tools/viz_anchor.py`:
