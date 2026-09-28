@@ -7,7 +7,8 @@
     # with GroundingDINO and the relation/reasoning subsets only
     python run_cgr.py --data_name mmstar --types relation,reasoning
 
-Writes rebuttal/<dataset>/<model>/cgr_maxNew<N>.jsonl with a cgr_response
+Writes rebuttal/<dataset>/<model>/cgr-<pipeline>-<backend>_maxNew<N>.jsonl
+with a cgr_response.
 field, so the scoring and table scripts work unchanged:
 
     python score_parallel.py --input <that file> --mode cgr \
@@ -34,6 +35,7 @@ sys.path.insert(
 from cgr.controller import Controller
 from cgr.reground import ReGrounding
 from cgr.grounded_cg import GroundedCCoT
+from cgr.strict_cg import StrictGroundedCCoT
 from cgr.react import React
 from cgr.select import Selector
 from cgr.tools import Tools
@@ -58,7 +60,7 @@ def parse_args():
     parser.add_argument("--types", type=str, default=None,
                         help="Only samples whose type contains one of these, comma separated")
     parser.add_argument("--pipeline", type=str, default="claims",
-                        choices=["cg", "react", "select", "claims", "constraint"],
+                        choices=["cg", "cgv2", "react", "select", "claims", "constraint"],
                         help="cg = grounded CCoT scene graph (recommended); "
                              "react = reason-act loop; select = sample N answers "
                              "and keep the best supported; claims = draft, verify, "
@@ -77,6 +79,17 @@ def parse_args():
                         help="The final answer cap, keep it equal to the CoT baseline's "
                              "max_new_tokens so the comparison is budget matched")
     parser.add_argument("--max_calls", type=int, default=48)
+    parser.add_argument("--fallback", type=str, default="refuse",
+                        choices=["refuse", "direct"],
+                        help="cgv2 在 plan 解析失败或 plan 为空时怎么办。refuse "
+                             "回答固定的'证据不足'，direct 退化成原方法那样的自由"
+                             "生成——那种情况下答案没有任何证据可对照，实测会产出"
+                             "很自信的幻觉，所以默认 refuse。")
+    parser.add_argument("--vision_attn", type=str, default=None,
+                        choices=["eager", "sdpa"],
+                        help="视觉塔的注意力实现。7B 用 eager 时峰值 21GB 以上，"
+                             "haloquest 这种大图会直接 OOM 并退化成 fallback 答案；"
+                             "表里 7B 那一列本来就是 sdpa 跑的，所以这里要一致。")
     parser.add_argument("--no_verify_relations", action="store_true")
 
     return parser.parse_args()
@@ -114,7 +127,7 @@ def main():
 
     device = args.device if args.device == "auto" else f"cuda:{args.device}"
 
-    model, processor = load_model(args.model_name, device)
+    model, processor = load_model(args.model_name, device, vision_attn=args.vision_attn)
 
     dino, dino_processor = (None, None)
 
@@ -135,6 +148,15 @@ def main():
     if args.pipeline == "cg":
 
         solver = GroundedCCoT(tools, max_elements=args.max_claims)
+
+    elif args.pipeline == "cgv2":
+
+        solver = StrictGroundedCCoT(
+            tools,
+            max_elements=args.max_claims,
+            answer_tokens=args.answer_tokens,
+            fallback=args.fallback,
+        )
 
     elif args.pipeline == "react":
 
@@ -266,6 +288,7 @@ def main():
             "type": sample.get("type", ""),
             "model_name": args.model_name,
             "mode": "cgr",
+            "vision_attn": args.vision_attn or "eager",
             "max_new_tokens": args.answer_tokens,
             "cgr_response": result["answer"],
             "cgr_fallback": result.get("fallback", False),
@@ -277,6 +300,14 @@ def main():
             "cgr_retracted": result.get("retracted"),
             "cgr_rejected": result.get("rejected"),
             "cgr_repaired": result.get("repaired"),
+            "cgr_outcome": result.get("outcome"),
+            "cgr_verdict_counts": result.get("verdict_counts"),
+            "cgr_uses": result.get("uses"),
+            "cgr_violations": result.get("violations"),
+            "cgr_repaired_uses": result.get("repaired_uses"),
+            "cgr_repaired_violations": result.get("repaired_violations"),
+            "cgr_fallback_reason": result.get("fallback_reason"),
+            "cgr_fallback_mode": args.fallback if args.pipeline == "cgv2" else None,
             "cgr_steps": result.get("steps"),
             "cgr_plan": result.get("plan"),
             "cgr_grounded": result.get("grounded"),

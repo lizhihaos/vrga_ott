@@ -26,7 +26,7 @@ mkdir -p "$LOGS"
 
 # The POPE pilot is using GPU 1 first; wait for its screen rather than for any
 # run_qwen_eval2.py process, because the MMStar full run is one of those too.
-while screen -ls 2>/dev/null | grep -q "pope_anchor"; do sleep 60; done
+while screen -ls 2>/dev/null | grep -qE "pope_anchor|pope_cg"; do sleep 60; done
 sleep 30
 
 echo "===== anchor boost sweep started $(date) ====="

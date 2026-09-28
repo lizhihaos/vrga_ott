@@ -1,12 +1,15 @@
 #!/bin/bash
-# Score the anchoring runs and print their tables.
+# Score a folder of generations and print their tables.
 #
-#   DATASET=POPE TAG=maxNew256 bash runs/score_anchor.sh
+#   DATASET=POPE TAG=maxNew256 bash runs/score_modes.sh
+#   DATASET=POPE TAG=maxNew256 \
+#       MODES="direct cot cgr-cg-dino anchor vrg" bash runs/score_modes.sh
 #   DATASET=mmstar TAG=boost50_maxNew2000 \
-#       MODES="cot anchor_cot vrg" bash runs/score_anchor.sh
+#       MODES="anchor_cot vrg" bash runs/score_modes.sh
 #
-# The anchoring modes all write `anchor_response`, whatever the mode is called,
-# so the field is passed explicitly instead of being derived from the name.
+# The answer field is not always the mode name: the anchoring modes all write
+# `anchor_response` and the cg pipelines write `cgr_response`, so the field is
+# mapped explicitly instead of being derived.
 set -u
 cd /home/lizhihao/phd/VRGA
 
@@ -15,7 +18,7 @@ PY=/home/lizhihao/miniconda3/envs/tifa/bin/python
 DATASET=${DATASET:-POPE}
 MODEL=${MODEL:-Qwen2.5-VL-3B-Instruct}
 TAG=${TAG:-maxNew256}
-MODES=${MODES:-direct cot anchor anchor_cot vrg}
+MODES=${MODES:-direct cot cgr-cg-dino anchor anchor_cot vrg}
 TOKENS=${TOKENS:-256}
 
 GEN_DIR="rebuttal/${DATASET}/${MODEL}"
@@ -23,6 +26,10 @@ SCORE_DIR="rebuttal/scores/${DATASET}/${MODEL}"
 LOGS=rebuttal/logs
 
 mkdir -p "$SCORE_DIR" "$LOGS"
+
+if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+    echo "DEEPSEEK_API_KEY is not set: scoring will fail." >&2
+fi
 
 for mode in $MODES; do
 
@@ -37,6 +44,7 @@ for mode in $MODES; do
     field="${mode}_response"
     case "$mode" in
         anchor|anchor_cot|vrg|anchor_*|vrg_*) field="anchor_response" ;;
+        cgr*) field="cgr_response" ;;
     esac
 
     # The score file is named after the generation file's mode tag, so a
