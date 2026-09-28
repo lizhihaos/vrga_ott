@@ -474,22 +474,6 @@ def evaluate(
         )
 
     # ========================================================
-    # Attention patch
-    #
-    # Anchoring replaces the eager attention default in the Qwen VL modules and
-    # is inert until an anchor is set, so it can stay installed for the whole
-    # run even when the same command also generates non-anchored modes.
-    # ========================================================
-
-    if any(mode in ANCHOR_MODES for mode in modes):
-
-        patched = install(model)
-
-        print(
-            f"Anchor patch  : {', '.join(patched)}"
-        )
-
-    # ========================================================
     # Load model
     # ========================================================
 
@@ -510,6 +494,24 @@ def evaluate(
     model.eval()
 
     print_gpu_memory("after model loading")
+
+    # ========================================================
+    # Attention patch
+    #
+    # Anchoring replaces the eager attention default in the Qwen VL modules and
+    # is inert until an anchor is set, so it can stay installed for the whole
+    # run even when the same command also generates non-anchored modes. It runs
+    # after the model is loaded because it reads the loaded config to check
+    # that the text attention is eager.
+    # ========================================================
+
+    if any(mode in ANCHOR_MODES for mode in modes):
+
+        patched = install(model)
+
+        print(
+            f"Anchor patch  : {', '.join(patched)}"
+        )
 
     # ========================================================
     # Main evaluation
