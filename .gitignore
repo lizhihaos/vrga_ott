@@ -24,3 +24,6 @@ qwen_eval2/demos/*/preview.png
 
 # Result tables
 rebuttal/baseline_table*.md
+
+# Paper collection: copyrighted PDFs and extracted text stay local.
+papers/
