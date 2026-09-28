@@ -1043,9 +1043,10 @@ def generate_anchored(
 
         # An empty anchor means every box was degenerate; that is a result to
         # report, not an error, so only a non-empty anchor has to prove it
-        # fired.
+        # fired. Both counters are deltas for this sample rather than running
+        # totals, so one record describes one sample.
         result["anchor_modified_steps"] = (
-            claim_hook_fired() if anchor.active else 0
+            claim_hook_fired() - before["modified"] if anchor.active else 0
         )
         result["anchor_eligible_steps"] = _CALLS["eligible"] - before["eligible"]
 

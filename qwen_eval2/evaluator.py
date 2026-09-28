@@ -759,18 +759,22 @@ def evaluate(
                             # dict of field name -> text.
                             # ------------------------------------------------
 
-                            # Everything lands under its output field name:
-                            # single pass modes give one string, CCoT and
-                            # ICoT give a dict of field name -> value.
+                            # Keyed by mode, not by output field: the three
+                            # anchoring modes all write `anchor_response`, so a
+                            # dict keyed by field would keep only the last of
+                            # them and every anchoring file would hold that
+                            # mode's answer.
                             if isinstance(output, dict):
 
-                                generated.update(output)
+                                generated[mode] = output
 
                             else:
 
                                 generated[
-                                    MODE_OUTPUT_FIELDS.get(mode, mode)
-                                ] = output
+                                    mode
+                                ] = {
+                                    MODE_OUTPUT_FIELDS.get(mode, mode): output
+                                }
 
                             generated_tokens[mode] = (
                                 current_max_tokens
@@ -1056,14 +1060,18 @@ def evaluate(
                         settings.get(mode, {})
                     )
 
+                    # Only this mode's own fields, so two modes sharing an
+                    # output field name cannot overwrite each other.
+                    this_mode = generated.get(mode, {})
+
                     for key in extra_fields.get(mode, ()):
 
-                        if key in generated:
-                            record[key] = generated[key]
+                        if key in this_mode:
+                            record[key] = this_mode[key]
 
                     output_field = MODE_OUTPUT_FIELDS.get(mode, mode)
 
-                    record[output_field] = generated.get(
+                    record[output_field] = this_mode.get(
                         output_field,
                         "",
                     )
